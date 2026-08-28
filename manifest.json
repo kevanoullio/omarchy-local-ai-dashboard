@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "kevano.local-ai-dashboard",
+  "name": "Local AI Dashboard",
+  "version": "0.1.0",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  }
+}
