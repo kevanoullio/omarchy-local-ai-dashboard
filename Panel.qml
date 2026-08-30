@@ -52,6 +52,11 @@ Panel {
     }
   }
 
+  // Open the active backend's config file in the user's editor/terminal.
+  function openConfig() {
+    Util.execArgv(["omarchy", "launch", "config", "editor", root.activeService.configPath])
+  }
+
   readonly property string statusText: serviceStatus(activeService)
   readonly property color statusColor: serviceStatusColor(activeService)
   readonly property string toggleHint: {
@@ -291,7 +296,9 @@ Panel {
               visible: root.activeService.running
               text: {
                 if (!root.activeService.apiReachable) return "\u2014"
-                return root.activeService.apiLatencyMs >= 0 ? root.activeService.apiLatencyMs + " ms" : "Reachable"
+                if (root.activeService.apiLatencyMs >= 0)
+                  return "Port: " + root.activeService.effectivePort + " | Latency: " + root.activeService.apiLatencyMs + " ms"
+                return "Port: " + root.activeService.effectivePort
               }
               color: {
                 if (!root.activeService.apiReachable) return root.urgent
@@ -310,26 +317,13 @@ Panel {
               text: root.activeService.activeSince ? root.activeService.sanitize(root.activeService.activeSince.replace(/^\w+\s+/, "")) : ""
             }
 
-            InfoLabel {
-              visible: root.activeService.running
-              text: "Models"
+            SettingsButton {
+              Layout.columnSpan: 2
+              Layout.fillWidth: true
+              label: "Configure " + root.activeService.backendDisplayName
+              onClicked: root.openConfig()
             }
-            InfoValue {
-              visible: root.activeService.running
-              text: {
-                if (root.activeService.models.length === 0) return "No local models"
-                var local = 0
-                var cloud = 0
-                for (var i = 0; i < root.activeService.models.length; i++) {
-                  if (root.activeService.models[i].isCloud) cloud++
-                  else local++
-                }
-                var parts = []
-                if (local > 0) parts.push(local + " local")
-                if (cloud > 0) parts.push(cloud + " cloud")
-                return parts.length > 0 ? parts.join(" \u00b7 ") : "0"
-              }
-            }
+
           }
         }
 
@@ -429,7 +423,19 @@ Panel {
           spacing: Style.space(10)
 
           PanelSectionHeader {
-            text: root.activeService.running ? "ALL MODELS" : "AVAILABLE MODELS"
+            text: {
+              var local = 0
+              var cloud = 0
+              for (var i = 0; i < root.activeService.models.length; i++) {
+                if (root.activeService.models[i].isCloud) cloud++
+                else local++
+              }
+              var parts = []
+              if (local > 0) parts.push(local + " local")
+              if (cloud > 0) parts.push(cloud + " cloud")
+              var count = parts.length > 0 ? "  " + parts.join(" \u00b7 ") : ""
+              return (root.activeService.running ? "ALL MODELS" : "AVAILABLE MODELS") + count
+            }
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -635,6 +641,53 @@ Panel {
       onEntered: { parent._hover = true; parent.hovered(true) }
       onExited: { parent._hover = false; parent.hovered(false) }
       onClicked: parent.clicked()
+    }
+  }
+
+  // A simple full-width button that opens the backend's config file in the
+  // user's editor/terminal (via `omarchy launch config editor`).
+  component SettingsButton: Item {
+    id: sb
+    required property string label
+    signal clicked()
+
+    property bool _hover: false
+
+    implicitHeight: contentRow.implicitHeight + Style.space(10)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.space(4)
+      color: sb._hover
+        ? Style.hoverBorderFor(root.foreground, Color.accent)
+        : Style.normalBorderFor(root.foreground, Color.accent)
+      border.color: Qt.darker(root.foreground, 1.7)
+      border.width: 1
+    }
+
+    Text {
+      id: contentRow
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(12)
+      anchors.rightMargin: Style.space(12)
+      text: sb.label
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      textFormat: Text.PlainText
+      horizontalAlignment: Text.AlignHCenter
+      elide: Text.ElideRight
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: sb._hover = true
+      onExited: sb._hover = false
+      onClicked: sb.clicked()
     }
   }
 }

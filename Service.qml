@@ -17,6 +17,34 @@ Item {
   readonly property int backendPort: backend === "llama.cpp" ? 8080 : 11434
   readonly property string backendHealthEndpoint: backend === "llama.cpp" ? "http://127.0.0.1:8080/health" : "http://127.0.0.1:11434/"
 
+  // ── Per-backend config file ─────────────────────────────────────────
+  // JSON config in the plugin `configs/` directory, editable by the user
+  // (see the settings button in Panel.qml). Lazy-created with defaults if
+  // missing, read on startup. Key order: host, port, api-key, then any
+  // backend-specific keys.
+  readonly property string backendConfigFile: backend === "llama.cpp" ? "llama.cpp.json" : "ollama.json"
+  readonly property string configPath: Qt.resolvedUrl("configs/" + backendConfigFile).toString().replace(/^file:\/\//, "")
+  readonly property string defaultConfigJson: backend === "llama.cpp"
+    ? '{"host":"127.0.0.1","port":8080,"api-key":"","models-preset":"~/.config/llama.cpp/models.ini","models-max":1}'
+    : '{"host":"127.0.0.1","port":11434,"api-key":""}'
+
+  property string configHost: "127.0.0.1"
+  property int configPort: 0
+  property string configApiKey: ""
+
+  readonly property string effectiveHost: configHost !== "" ? configHost : "127.0.0.1"
+  readonly property int effectivePort: configPort > 0 ? configPort : backendPort
+  readonly property string effectiveHealthEndpoint: "http://" + effectiveHost + ":" + effectivePort + (backend === "llama.cpp" ? "/health" : "/")
+
+  // curl auth header for the API, only sent when an api-key is configured.
+  readonly property string apiKeyCurlHeader: {
+    if (configApiKey === "") return ""
+    var safe = String(configApiKey).replace(/'/g, "'\\''")
+    return backend === "llama.cpp"
+      ? " -H 'X-Api-Key: " + safe + "'"
+      : " -H 'Authorization: Bearer " + safe + "'"
+  }
+
   // ── State ─────────────────────────────────────────────────────────
   property bool installed: false       // backend binary on PATH
   property bool hasService: false      // systemd unit file exists
@@ -77,6 +105,7 @@ Item {
   readonly property int capVersion: 256    // version output
   readonly property int capApi: 128        // API health check output
   readonly property int capAction: 512     // start/stop stderr capture
+  readonly property int capConfig: 2048    // config file read output
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -378,7 +407,11 @@ Item {
   // ollama --version → version string (only fetched once per session)
   function _onVersionLine(line) {
     if (ollamaVersion === "") {
-      ollamaVersion = truncate(String(line || "").trim(), 128)
+      var v = String(line || "").trim()
+      if (backend === "llama.cpp") {
+        v = v.replace(/,\s*commit\s+[^\s)]+/, "").trim()
+      }
+      ollamaVersion = truncate(v, 128)
     }
   }
 
@@ -401,6 +434,38 @@ Item {
     var latency = parseInt(parts[1], 10)
     apiReachable = (code === 200)
     apiLatencyMs = isFinite(latency) && latency >= 0 ? latency : -1
+  }
+
+  // ── Config file → JSON → state ──────────────────────────────────────
+  property string _configBuffer: ""
+  readonly property int _configBufferMax: 2048
+
+  function _onConfigLine(line) {
+    var s = String(line || "")
+    if (_configBuffer.length + s.length + 1 <= _configBufferMax) {
+      _configBuffer += s + "\n"
+    }
+  }
+
+  function _parseConfigBuffer() {
+    var raw = truncate(_configBuffer.trim(), _configBufferMax)
+    _configBuffer = ""
+    try {
+      var obj = JSON.parse(raw)
+      configHost = String(obj["host"] || "127.0.0.1")
+      var p = parseInt(obj["port"], 10)
+      configPort = isFinite(p) && p > 0 ? p : 0
+      configApiKey = String(obj["api-key"] || "")
+    } catch(e) {
+      configHost = "127.0.0.1"
+      configPort = 0
+      configApiKey = ""
+    }
+  }
+
+  // Lazily create the config file with defaults, then read it back.
+  function ensureAndReadConfig() {
+    launch(configProcess, configWatchdog)
   }
 
   function isCloudModel(name) {
@@ -475,7 +540,7 @@ Item {
     id: apiHealthProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 " + root.backendHealthEndpoint + "); end=$(date +%s%3N); echo \"$status $((end - start))\" | head -c " + root.capApi]
+              "bash", "-c", "set -o pipefail; start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}'" + root.apiKeyCurlHeader + " --connect-timeout 3 --max-time 5 " + root.effectiveHealthEndpoint + "); end=$(date +%s%3N); echo \"$status $((end - start))\" | head -c " + root.capApi]
     stdout: SplitParser { onRead: function(line) { root._onApiLine(line) } }
     onExited: function(exitCode) {
       apiHealthWatchdog.stop()
@@ -493,7 +558,7 @@ Item {
     id: listProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; if [ \"" + root.backend + "\" = \"llama.cpp\" ]; then curl -s http://127.0.0.1:" + root.backendPort + "/v1/models 2>&1 | head -c " + root.capList + "; else ollama list 2>&1 | head -c " + root.capList + "; fi"]
+              "bash", "-c", "set -o pipefail; if [ \"" + root.backend + "\" = \"llama.cpp\" ]; then curl -s" + root.apiKeyCurlHeader + " http://" + root.effectiveHost + ":" + root.effectivePort + "/v1/models 2>&1 | head -c " + root.capList + "; else ollama list 2>&1 | head -c " + root.capList + "; fi"]
     stdout: SplitParser { onRead: function(line) { root.backend === "llama.cpp" ? root._onJsonLine(line) : root._onListLine(line) } }
     onExited: function(exitCode) {
       listWatchdog.stop()
@@ -531,6 +596,19 @@ Item {
     stdout: SplitParser { onRead: function(line) { root._onVersionLine(line) } }
     onExited: function(exitCode) {
       versionWatchdog.stop()
+    }
+  }
+
+  // Config file: lazily create it with defaults if missing, then read it.
+  Process {
+    id: configProcess
+    running: false
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c", "f='" + root.configPath + "'; if [ ! -f \"$f\" ]; then printf '%s' '" + root.defaultConfigJson + "' > \"$f\"; fi; cat \"$f\" | head -c " + root.capConfig]
+    stdout: SplitParser { onRead: function(line) { root._onConfigLine(line) } }
+    onExited: function(exitCode) {
+      configWatchdog.stop()
+      _parseConfigBuffer()
     }
   }
 
@@ -637,6 +715,13 @@ Item {
   }
 
   Timer {
+    id: configWatchdog
+    interval: watchdogMs
+    repeat: false
+    onTriggered: reap(configProcess, configWatchdog)
+  }
+
+  Timer {
     id: startActionWatchdog
     interval: startWatchdogMs
     repeat: false
@@ -671,5 +756,6 @@ Item {
   Component.onCompleted: {
     whichProcess.running = true
     whichWatchdog.restart()
+    ensureAndReadConfig()
   }
 }
