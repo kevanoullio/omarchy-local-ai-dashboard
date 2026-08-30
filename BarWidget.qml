@@ -14,6 +14,12 @@ BarWidget {
     ? panelLoader.item.popoutSwitchClosing === true
     : false
 
+  property string activeBackend: "llama.cpp"
+
+  function setActiveBackend(name) {
+    if (name === "ollama" || name === "llama.cpp") activeBackend = name
+  }
+
   function open() {
     if (panelLoader.item) panelLoader.item.open()
   }
@@ -37,22 +43,28 @@ BarWidget {
     panelLoader.item.hostWidget = root
   }
 
+  function serviceStateString(svc) {
+    if (!svc) return "…"
+    if (!svc.installed) return "Not installed"
+    if (!svc.hasService) return "No service"
+    return svc.running ? "Running" : "Stopped"
+  }
+
+  readonly property var _activeService: panelLoader.item
+    ? (activeBackend === "llama.cpp" ? panelLoader.item.llamaService : panelLoader.item.ollamaService)
+    : null
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   onBarChanged: injectPanel()
 
-  Service {
-    id: ollama
-    settings: root.settings
-  }
-
   readonly property color barIconColor: {
-    if (!ollama.installed || !ollama.hasService)
-      return bar ? Qt.darker(bar.barForeground, 2.0) : Qt.darker(Color.foreground, 2.0)
-    if (ollama.running)
-      return bar ? bar.barForeground : Color.foreground
-    return bar ? Qt.darker(bar.barForeground, 1.55) : Qt.darker(Color.foreground, 1.55)
+    var s = _activeService
+    var base = bar ? bar.barForeground : Color.foreground
+    if (!s || !s.installed || !s.hasService) return Qt.darker(base, 2.0)
+    if (s.running) return base
+    return Qt.darker(base, 1.55)
   }
 
   Loader {
@@ -71,10 +83,10 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     tooltipText: {
-      if (!ollama.installed) return "Ollama \u00b7 Not installed"
-      if (!ollama.hasService) return "Ollama \u00b7 No service"
-      if (ollama.running) return "Ollama \u00b7 Running"
-      return "Ollama \u00b7 Stopped"
+      var p = panelLoader.item
+      if (!p) return "Local AI"
+      return "Llama.cpp \u00b7 " + root.serviceStateString(p.llamaService) +
+             "   |   Ollama \u00b7 " + root.serviceStateString(p.ollamaService)
     }
     iconComponent: Component {
       Item {
@@ -94,8 +106,12 @@ BarWidget {
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
-      else if (buttonCode === Qt.RightButton) ollama.toggleService()
-      else if (buttonCode === Qt.MiddleButton) ollama.refresh()
+      else {
+        var s = root._activeService
+        if (!s) return
+        if (buttonCode === Qt.RightButton) s.toggleService()
+        else if (buttonCode === Qt.MiddleButton) s.refresh()
+      }
     }
   }
 }

@@ -8,8 +8,17 @@ Item {
 
   property var settings: ({})
 
+  // ── Backend selection ────────────────────────────────────────────────
+  property string backend: "ollama"  // "ollama" | "llama.cpp"
+
+  readonly property string backendDisplayName: backend === "llama.cpp" ? "llama.cpp" : "Ollama"
+  readonly property string backendBinary: backend === "llama.cpp" ? "llama-server" : "ollama"
+  readonly property string backendService: backend === "llama.cpp" ? "llama.cpp.service" : "ollama.service"
+  readonly property int backendPort: backend === "llama.cpp" ? 8080 : 11434
+  readonly property string backendHealthEndpoint: backend === "llama.cpp" ? "http://127.0.0.1:8080/health" : "http://127.0.0.1:11434/"
+
   // ── State ─────────────────────────────────────────────────────────
-  property bool installed: false       // ollama binary on PATH
+  property bool installed: false       // backend binary on PATH
   property bool hasService: false      // systemd unit file exists
   property bool running: false
   property bool busy: false
@@ -63,9 +72,9 @@ Item {
   // discards so truncated output is never parsed.
   readonly property int capService: 2048     // systemctl show output
   readonly property int capCheck: 512       // systemctl list-unit-files output
-  readonly property int capList: 65536      // ollama list output
-  readonly property int capPs: 16384       // ollama ps output
-  readonly property int capVersion: 256    // ollama --version output
+  readonly property int capList: 65536      // model list output
+  readonly property int capPs: 16384       // running models output
+  readonly property int capVersion: 256    // version output
   readonly property int capApi: 128        // API health check output
   readonly property int capAction: 512     // start/stop stderr capture
 
@@ -110,13 +119,13 @@ Item {
       return (verb === "start" ? "Start": "Stop") + " cancelled — authentication was dismissed."
     }
     if (/not authorized|permission denied|access denied/i.test(s)) {
-      return "Cannot " + verb + " Ollama: you are not authorized to manage system services."
+      return "Cannot " + verb + " " + root.backendDisplayName + ": you are not authorized to manage system services."
     }
     if (/no authentication agent|error creating textual authentication agent/i.test(s)) {
-      return "Cannot " + verb + " Ollama: no polkit authentication agent found.\n" +
+      return "Cannot " + verb + " " + root.backendDisplayName + ": no polkit authentication agent found.\n" +
              "Make sure the Polkit plugin is enabled in omarchy-shell settings."
     }
-    return "Failed to " + verb + " Ollama" + (s !== "" ? ": " + truncate(s, 160) : "")
+    return "Failed to " + verb + " " + root.backendDisplayName
   }
 
   // ── Process management ──────────────────────────────────────────────
@@ -164,7 +173,7 @@ Item {
   function startService() {
     if (busy || !installed || !hasService) return
     busy = true
-    actionLabel = "Starting Ollama…"
+    actionLabel = "Starting " + root.backendDisplayName + "…"
     lastError = ""
     startProcess.running = true
     startActionWatchdog.restart()
@@ -173,7 +182,7 @@ Item {
   function stopService() {
     if (busy || !installed || !hasService) return
     busy = true
-    actionLabel = "Stopping Ollama…"
+    actionLabel = "Stopping " + root.backendDisplayName + "…"
     lastError = ""
     stopProcess.running = true
     stopActionWatchdog.restart()
@@ -239,11 +248,11 @@ Item {
   function _parseCheckBuffer() {
     var output = truncate(_checkBuffer.trim(), 512)
     _checkBuffer = ""
-    hasService = output.length > 0 && output.indexOf("ollama.service") !== -1
+    hasService = output.length > 0 && output.indexOf(root.backendService) !== -1
     if (hasService) refresh()
   }
 
-  // ollama list → model list
+  // ollama list → model list (tabular format)
   property var _listModels: []
   property bool _listHeaderSeen: false
 
@@ -268,6 +277,40 @@ Item {
   function _finishList() {
     models = _listModels
     _listModels = []
+    _listHeaderSeen = false
+  }
+
+  // llama.cpp /v1/models → model list (JSON format)
+  property string _jsonBuffer: ""
+  readonly property int _jsonBufferMax: 65536
+
+  function _onJsonLine(line) {
+    var s = String(line || "")
+    if (_jsonBuffer.length + s.length + 1 <= _jsonBufferMax) {
+      _jsonBuffer += s + "\n"
+    }
+  }
+
+  function _finishJsonModels() {
+    var raw = _jsonBuffer.trim()
+    _jsonBuffer = ""
+    try {
+      var obj = JSON.parse(raw)
+      var data = obj.data || []
+      _listModels = []
+      for (var i = 0; i < data.length; i++) {
+        var m = data[i]
+        _listModels.push({
+          name: truncate(m.id || "", 128),
+          id: truncate(m.id || "", 64),
+          size: "",
+          modified: "",
+          isCloud: false
+        })
+      }
+    } catch(e) {
+      _listModels = []
+    }
     _listHeaderSeen = false
   }
 
@@ -296,6 +339,39 @@ Item {
   function _finishPs() {
     runningModels = _psModels
     _psModels = []
+    _psHeaderSeen = false
+  }
+
+  // llama.cpp running models: pgrep → extract --model / -m argument
+  property string _pgrepBuffer: ""
+  readonly property int _pgrepBufferMax: 512
+
+  function _onPgrepLine(line) {
+    var s = String(line || "")
+    if (_pgrepBuffer.length + s.length + 1 <= _pgrepBufferMax) {
+      _pgrepBuffer += s + "\n"
+    }
+  }
+
+  function _finishPgrep() {
+    var raw = _pgrepBuffer.trim()
+    _pgrepBuffer = ""
+    var lines = raw === "" ? [] : raw.split("\n")
+    _psModels = []
+    for (var i = 0; i < lines.length && _psModels.length < maxRunning; i++) {
+      var match = String(lines[i]).trim().match(/(?:--model|-m)[= ]+([^ ]+)/)
+      if (!match) continue
+      var path = match[1]
+      var name = path.split("/").pop()
+      _psModels.push({
+        name: truncate(name || "Unknown model", 128),
+        id: "local",
+        size: "",
+        processor: "CPU",
+        context: "",
+        until: "loaded"
+      })
+    }
     _psHeaderSeen = false
   }
 
@@ -348,7 +424,7 @@ Item {
     id: whichProcess
     running: false
     // which has no children and no stdout handler — timeout not needed
-    command: ["which", "ollama"]
+    command: ["which", root.backendBinary]
     onExited: function(exitCode) {
       whichWatchdog.stop()
       installed = exitCode === 0
@@ -367,7 +443,7 @@ Item {
     id: checkServiceProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; systemctl list-unit-files ollama.service --no-legend 2>&1 | head -c " + root.capCheck]
+              "bash", "-c", "set -o pipefail; systemctl list-unit-files " + root.backendService + " --no-legend 2>&1 | head -c " + root.capCheck]
     stdout: SplitParser { onRead: function(line) { root._onCheckLine(line) } }
     onExited: function(exitCode) {
       checkServiceWatchdog.stop()
@@ -380,7 +456,7 @@ Item {
     id: serviceProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; systemctl show ollama --property=ActiveState,SubState,ActiveEnterTimestamp 2>&1 | head -c " + root.capService]
+              "bash", "-c", "set -o pipefail; systemctl show " + root.backendService.replace('.service', '') + " --property=ActiveState,SubState,ActiveEnterTimestamp 2>&1 | head -c " + root.capService]
     stdout: SplitParser { onRead: function(line) { root._onServiceLine(line) } }
     onExited: function(exitCode) {
       serviceWatchdog.stop()
@@ -399,7 +475,7 @@ Item {
     id: apiHealthProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:11434/); end=$(date +%s%3N); echo \"$status $((end - start))\" | head -c " + root.capApi]
+              "bash", "-c", "set -o pipefail; start=$(date +%s%3N); status=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 " + root.backendHealthEndpoint + "); end=$(date +%s%3N); echo \"$status $((end - start))\" | head -c " + root.capApi]
     stdout: SplitParser { onRead: function(line) { root._onApiLine(line) } }
     onExited: function(exitCode) {
       apiHealthWatchdog.stop()
@@ -417,12 +493,16 @@ Item {
     id: listProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; ollama list 2>&1 | head -c " + root.capList]
-    stdout: SplitParser { onRead: function(line) { root._onListLine(line) } }
+              "bash", "-c", "set -o pipefail; if [ \"" + root.backend + "\" = \"llama.cpp\" ]; then curl -s http://127.0.0.1:" + root.backendPort + "/v1/models 2>&1 | head -c " + root.capList + "; else ollama list 2>&1 | head -c " + root.capList + "; fi"]
+    stdout: SplitParser { onRead: function(line) { root.backend === "llama.cpp" ? root._onJsonLine(line) : root._onListLine(line) } }
     onExited: function(exitCode) {
       listWatchdog.stop()
-      if (exitCode === 0) _finishList()
-      else { _listModels = []; _listHeaderSeen = false }
+      if (exitCode === 0) {
+        if (root.backend === "llama.cpp") _finishJsonModels()
+        else _finishList()
+      } else {
+        _listModels = []; _listHeaderSeen = false
+      }
     }
   }
 
@@ -430,12 +510,16 @@ Item {
     id: psProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; ollama ps 2>&1 | head -c " + root.capPs]
-    stdout: SplitParser { onRead: function(line) { root._onPsLine(line) } }
+              "bash", "-c", "set -o pipefail; if [ \"" + root.backend + "\" = \"llama.cpp\" ]; then pgrep -af '[l]lama-server' | grep -oE '(--model|-m)[= ][^ ]+' 2>&1 | head -c " + root.capPs + "; else ollama ps 2>&1 | head -c " + root.capPs + "; fi"]
+    stdout: SplitParser { onRead: function(line) { root.backend === "llama.cpp" ? root._onPgrepLine(line) : root._onPsLine(line) } }
     onExited: function(exitCode) {
       psWatchdog.stop()
-      if (exitCode === 0) _finishPs()
-      else { _psModels = []; _psHeaderSeen = false }
+      if (exitCode === 0) {
+        if (root.backend === "llama.cpp") _finishPgrep()
+        else _finishPs()
+      } else {
+        _psModels = []; _psHeaderSeen = false
+      }
     }
   }
 
@@ -443,7 +527,7 @@ Item {
     id: versionProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; ollama --version 2>&1 | head -c " + root.capVersion]
+              "bash", "-c", "set -o pipefail; " + root.backendBinary + " --version 2>&1 | head -c " + root.capVersion]
     stdout: SplitParser { onRead: function(line) { root._onVersionLine(line) } }
     onExited: function(exitCode) {
       versionWatchdog.stop()
@@ -468,7 +552,7 @@ Item {
     id: startProcess
     running: false
     command: ["timeout", "-k", "2", "" + startTimeoutSec,
-              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl start ollama 2>&1 | head -c " + root.capAction]
+              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl start " + root.backendService + " 2>&1 | head -c " + root.capAction]
     stdout: SplitParser { onRead: function(line) { root._onStartLine(line) } }
     onExited: function(exitCode) {
       startActionWatchdog.stop()
@@ -485,7 +569,7 @@ Item {
     id: stopProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl stop ollama 2>&1 | head -c " + root.capAction]
+              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl stop " + root.backendService + " 2>&1 | head -c " + root.capAction]
     stdout: SplitParser { onRead: function(line) { root._onStopLine(line) } }
     onExited: function(exitCode) {
       stopActionWatchdog.stop()
@@ -589,4 +673,3 @@ Item {
     whichWatchdog.restart()
   }
 }
-

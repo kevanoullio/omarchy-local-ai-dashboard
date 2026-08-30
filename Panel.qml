@@ -19,26 +19,49 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property string statusText: {
-    if (ollama.busy) return ollama.actionLabel
-    if (!ollama.installed) return "Not installed"
-    if (!ollama.hasService) return "No service"
-    if (ollama.running) return "Running"
-    return "Stopped"
+
+  // ── Active backend selection ────────────────────────────────────────
+  property string activeBackend: "llama.cpp"
+  readonly property var activeService: activeBackend === "llama.cpp" ? serviceLlama : serviceOllama
+
+  // Exposed for the bar widget to read without its own Service instance.
+  property var ollamaService: serviceOllama
+  property var llamaService: serviceLlama
+
+  function serviceStatus(svc) {
+    if (svc.busy) return svc.actionLabel
+    if (!svc.installed) return "Not installed"
+    if (!svc.hasService) return "No service"
+    return svc.running ? "Running" : "Stopped"
   }
-  readonly property color statusColor: {
-    if (ollama.busy) return foreground
-    if (!ollama.installed) return urgent
-    if (!ollama.hasService) return urgent
-    if (ollama.running) return Color.accent
-    return dim
+
+  function serviceStatusColor(svc) {
+    if (svc.busy) return foreground
+    if (!svc.installed) return urgent
+    if (!svc.hasService) return urgent
+    if (svc.running) return Color.accent
+    return foreground
   }
+
+  function switchBackend(name) {
+    if (name !== "ollama" && name !== "llama.cpp") return
+    if (name === activeBackend) return
+    activeBackend = name
+    if (hostWidget && typeof hostWidget.setActiveBackend === "function") {
+      hostWidget.setActiveBackend(name)
+    }
+  }
+
+  readonly property string statusText: serviceStatus(activeService)
+  readonly property color statusColor: serviceStatusColor(activeService)
   readonly property string toggleHint: {
-    if (!ollama.installed) return ""
-    if (!ollama.hasService) return "See setup instructions below"
-    if (ollama.running) return "Turn Ollama off"
-    return "Turn Ollama on"
+    var s = activeService
+    if (!s.installed) return ""
+    if (!s.hasService) return "See setup instructions below"
+    if (s.running) return "Turn " + s.backendDisplayName + " off"
+    return "Turn " + s.backendDisplayName + " on"
   }
+
   property string focusSection: "header"
   property bool cursorActive: false
 
@@ -50,13 +73,21 @@ Panel {
 
   onOpenedChanged: if (opened) {
     cursorActive = false
-    ollama.refresh()
+    serviceOllama.refresh()
+    serviceLlama.refresh()
     Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
   }
 
   Service {
-    id: ollama
+    id: serviceOllama
     settings: root.settings
+    backend: "ollama"
+  }
+
+  Service {
+    id: serviceLlama
+    settings: root.settings
+    backend: "llama.cpp"
   }
 
   IpcHandler {
@@ -64,9 +95,9 @@ Panel {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function startService(): string { ollama.startService(); return "ok" }
-    function stopService(): string { ollama.stopService(); return "ok" }
-    function refresh(): string { ollama.refresh(); return "ok" }
+    function startService(): string { root.activeService.startService(); return "ok" }
+    function stopService(): string { root.activeService.stopService(); return "ok" }
+    function refresh(): string { root.serviceOllama.refresh(); root.serviceLlama.refresh(); return "ok" }
   }
 
   KeyboardPanel {
@@ -86,14 +117,14 @@ Panel {
         if (!root.cursorActive) root.cursorActive = true
       }
       onActivateRequested: {
-        if (root.cursorActive && root.focusSection === "header") ollama.toggleService()
+        if (root.cursorActive && root.focusSection === "header") root.activeService.toggleService()
       }
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "s" || t === "S") ollama.startService()
-        else if (t === "x" || t === "X") ollama.stopService()
-        else if (t === "r" || t === "R") ollama.refresh()
+        if (t === "s" || t === "S") root.activeService.startService()
+        else if (t === "x" || t === "X") root.activeService.stopService()
+        else if (t === "r" || t === "R") { root.serviceOllama.refresh(); root.serviceLlama.refresh() }
       }
     }
 
@@ -113,41 +144,56 @@ Panel {
         width: panelFlick.width
         spacing: Style.space(12)
 
-        // ── Hero ────────────────────────────────────────────────────
+        // ── Hero: two backend cards + power switch ──────────────────
         Item {
           width: parent.width
-          implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight, heroActions.implicitHeight)
-
-          Text {
-            id: heroIcon
-            // Nerd Font PUA glyph — must be a literal character, not a
-            // \u escape, because QML doesn't resolve private-use codepoints.
-            text: "󰚩"
-            color: root.statusColor
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.display
-            textFormat: Text.PlainText
-            opacity: ollama.installed ? 1.0 : 0.5
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-          }
+          implicitHeight: heroRow.implicitHeight
 
           RowLayout {
-            id: heroActions
-            spacing: Style.space(8)
+            id: heroRow
+            anchors.left: parent.left
             anchors.right: parent.right
+            anchors.leftMargin: Style.space(2)
+            anchors.rightMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(8)
+
+            BackendCard {
+              Layout.fillWidth: true
+              Layout.preferredWidth: Style.space(150)
+              Layout.minimumWidth: Style.space(110)
+              name: "Llama.cpp"
+              statusText: root.serviceStatus(root.serviceLlama)
+              statusColor: root.serviceStatusColor(root.serviceLlama)
+              active: root.activeBackend === "llama.cpp"
+              onClicked: root.switchBackend("llama.cpp")
+              onHovered: function(on) { if (on) { root.cursorActive = true; root.focusSection = "header" } }
+            }
+
+            BackendCard {
+              Layout.fillWidth: true
+              Layout.preferredWidth: Style.space(150)
+              Layout.minimumWidth: Style.space(110)
+              name: "Ollama"
+              statusText: root.serviceStatus(root.serviceOllama)
+              statusColor: root.serviceStatusColor(root.serviceOllama)
+              active: root.activeBackend === "ollama"
+              onClicked: root.switchBackend("ollama")
+              onHovered: function(on) { if (on) { root.cursorActive = true; root.focusSection = "header" } }
+            }
 
             ToggleSwitch {
               id: powerSwitch
-              visible: ollama.installed && ollama.hasService
-              checked: ollama.running
-              busy: ollama.busy
+              Layout.alignment: Qt.AlignVCenter
+              Layout.fillWidth: false
+              Layout.minimumWidth: implicitWidth
+              visible: root.activeService.installed && root.activeService.hasService
+              checked: root.activeService.running
+              busy: root.activeService.busy
               hasCursor: root.cursorActive && root.focusSection === "header"
               foreground: root.foreground
-              Layout.alignment: Qt.AlignVCenter
               onHovered: function(on) { if (on) { root.cursorActive = true; root.focusSection = "header" } }
-              onToggled: ollama.toggleService()
+              onToggled: root.activeService.toggleService()
 
               PanelToolTip {
                 visible: powerSwitch.containsMouse
@@ -156,45 +202,13 @@ Panel {
               }
             }
           }
-
-          Column {
-            id: heroLabels
-            anchors.left: heroIcon.right
-            anchors.leftMargin: Style.space(14)
-            anchors.right: parent.right
-            anchors.rightMargin: heroActions.width > 0 ? heroActions.width + Style.space(12) : 0
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(2)
-
-            Text {
-              width: parent.width
-              text: "Ollama"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.title
-              font.bold: true
-              elide: Text.ElideRight
-            }
-
-            Text {
-              width: parent.width
-              text: root.statusText.toUpperCase()
-              color: root.statusColor
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              font.letterSpacing: 1.2
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-            }
-          }
         }
 
         // ── Error ───────────────────────────────────────────────────
         Text {
-          visible: ollama.lastError !== ""
+          visible: root.activeService.lastError !== ""
           width: parent.width
-          text: ollama.sanitize(ollama.lastError)
+          text: root.activeService.sanitize(root.activeService.lastError)
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -204,7 +218,7 @@ Panel {
 
         // ── Not installed ────────────────────────────────────────────
         CursorSurface {
-          visible: !ollama.installed
+          visible: !root.activeService.installed
           width: parent.width
           implicitHeight: missingText.implicitHeight + Style.spacing.rowPaddingX
           foreground: root.foreground
@@ -215,7 +229,7 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             anchors.margins: Style.space(12)
-            text: "Ollama is not installed or not on PATH.\nInstall it from ollama.com and try again."
+            text: root.activeService.backendDisplayName + " is not installed or not on PATH.\nInstall it and try again."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -226,7 +240,7 @@ Panel {
 
         // ── No service ────────────────────────────────────────────────
         CursorSurface {
-          visible: ollama.installed && !ollama.hasService
+          visible: root.activeService.installed && !root.activeService.hasService
           width: parent.width
           implicitHeight: noServiceText.implicitHeight + Style.spacing.rowPaddingX
           foreground: root.foreground
@@ -237,7 +251,7 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             anchors.margins: Style.space(12)
-            text: "Ollama is installed but has no systemd service.\nSet one up with:\n\nsudo systemctl enable ollama\n\nSee the README for a unit file if none is packaged."
+            text: root.activeService.backendDisplayName + " is installed but has no systemd service.\nSet one up with:\n\nsudo systemctl enable " + root.activeService.backendService.replace('.service', '') + "\n\nSee the README for a unit file if none is packaged."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -248,7 +262,7 @@ Panel {
 
         // ── Service details ─────────────────────────────────────────
         Column {
-          visible: ollama.installed && ollama.hasService
+          visible: root.activeService.installed && root.activeService.hasService
           width: parent.width
           spacing: Style.spacing.labelGap
 
@@ -260,54 +274,54 @@ Panel {
 
             InfoLabel { text: "Status" }
             InfoValue {
-              text: ollama.running ? "Running" : "Stopped"
+              text: root.activeService.running ? "Running" : "Stopped"
               color: root.statusColor
             }
 
             InfoLabel { text: "Version" }
             InfoValue {
-              text: ollama.sanitize(ollama.ollamaVersion) || "\u2014"
+              text: root.activeService.sanitize(root.activeService.ollamaVersion) || "\u2014"
             }
 
             InfoLabel {
-              visible: ollama.running
+              visible: root.activeService.running
               text: "API"
             }
             InfoValue {
-              visible: ollama.running
+              visible: root.activeService.running
               text: {
-                if (!ollama.apiReachable) return "\u2014"
-                return ollama.apiLatencyMs >= 0 ? ollama.apiLatencyMs + " ms" : "Reachable"
+                if (!root.activeService.apiReachable) return "\u2014"
+                return root.activeService.apiLatencyMs >= 0 ? root.activeService.apiLatencyMs + " ms" : "Reachable"
               }
               color: {
-                if (!ollama.apiReachable) return root.urgent
-                if (ollama.apiLatencyMs > 500) return root.urgent
-                if (ollama.apiLatencyMs > 200) return Color.accent
+                if (!root.activeService.apiReachable) return root.urgent
+                if (root.activeService.apiLatencyMs > 500) return root.urgent
+                if (root.activeService.apiLatencyMs > 200) return Color.accent
                 return root.foreground
               }
             }
 
             InfoLabel {
-              visible: ollama.running && ollama.activeSince !== ""
+              visible: root.activeService.running && root.activeService.activeSince !== ""
               text: "Since"
             }
             InfoValue {
-              visible: ollama.running && ollama.activeSince !== ""
-              text: ollama.activeSince ? ollama.sanitize(ollama.activeSince.replace(/^\w+\s+/, "")) : ""
+              visible: root.activeService.running && root.activeService.activeSince !== ""
+              text: root.activeService.activeSince ? root.activeService.sanitize(root.activeService.activeSince.replace(/^\w+\s+/, "")) : ""
             }
 
             InfoLabel {
-              visible: ollama.running
+              visible: root.activeService.running
               text: "Models"
             }
             InfoValue {
-              visible: ollama.running
+              visible: root.activeService.running
               text: {
-                if (ollama.models.length === 0) return "No local models"
+                if (root.activeService.models.length === 0) return "No local models"
                 var local = 0
                 var cloud = 0
-                for (var i = 0; i < ollama.models.length; i++) {
-                  if (ollama.models[i].isCloud) cloud++
+                for (var i = 0; i < root.activeService.models.length; i++) {
+                  if (root.activeService.models[i].isCloud) cloud++
                   else local++
                 }
                 var parts = []
@@ -321,12 +335,12 @@ Panel {
 
         // ── Running models ──────────────────────────────────────────
         PanelSeparator {
-          visible: ollama.running && ollama.runningModels.length > 0
+          visible: root.activeService.running && root.activeService.runningModels.length > 0
           foreground: root.foreground
         }
 
         Column {
-          visible: ollama.running && ollama.runningModels.length > 0
+          visible: root.activeService.running && root.activeService.runningModels.length > 0
           width: parent.width
           spacing: Style.space(10)
 
@@ -341,7 +355,7 @@ Panel {
             spacing: Style.space(6)
 
             Repeater {
-              model: ollama.runningModels
+              model: root.activeService.runningModels
 
               CursorSurface {
                 required property var modelData
@@ -373,7 +387,7 @@ Panel {
 
                     Text {
                       Layout.fillWidth: true
-                      text: ollama.sanitize(modelData.name || "Unknown")
+                      text: root.activeService.sanitize(modelData.name || "Unknown")
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
@@ -387,7 +401,7 @@ Panel {
                         var parts = []
                         if (modelData.size) parts.push(String(modelData.size))
                         if (modelData.processor) parts.push(String(modelData.processor))
-                        return ollama.sanitize(parts.join(" \u00b7 "))
+                        return root.activeService.sanitize(parts.join(" \u00b7 "))
                       }
                       visible: text !== ""
                       color: root.dim
@@ -405,17 +419,17 @@ Panel {
 
         // ── Available models ─────────────────────────────────────────
         PanelSeparator {
-          visible: ollama.installed && ollama.models.length > 0
+          visible: root.activeService.installed && root.activeService.models.length > 0
           foreground: root.foreground
         }
 
         Column {
-          visible: ollama.installed && ollama.models.length > 0
+          visible: root.activeService.installed && root.activeService.models.length > 0
           width: parent.width
           spacing: Style.space(10)
 
           PanelSectionHeader {
-            text: ollama.running ? "ALL MODELS" : "AVAILABLE MODELS"
+            text: root.activeService.running ? "ALL MODELS" : "AVAILABLE MODELS"
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -425,7 +439,7 @@ Panel {
             spacing: Style.space(6)
 
             Repeater {
-              model: ollama.models
+              model: root.activeService.models
 
               CursorSurface {
                 required property var modelData
@@ -445,15 +459,15 @@ Panel {
                   Text {
                     text: {
                       if (modelData.isCloud) return "\u2601"
-                      for (var i = 0; i < ollama.runningModels.length; i++) {
-                        if (String(ollama.runningModels[i].name) === String(modelData.name)) return "\u25cf"
+                      for (var i = 0; i < root.activeService.runningModels.length; i++) {
+                        if (String(root.activeService.runningModels[i].name) === String(modelData.name)) return "\u25cf"
                       }
                       return "\u25cb"
                     }
                     color: {
                       if (modelData.isCloud) return Color.accent
-                      for (var i = 0; i < ollama.runningModels.length; i++) {
-                        if (String(ollama.runningModels[i].name) === String(modelData.name)) return Color.accent
+                      for (var i = 0; i < root.activeService.runningModels.length; i++) {
+                        if (String(root.activeService.runningModels[i].name) === String(modelData.name)) return Color.accent
                       }
                       return root.dim
                     }
@@ -469,7 +483,7 @@ Panel {
 
                     Text {
                       Layout.fillWidth: true
-                      text: ollama.sanitize(modelData.name || "Unknown")
+                      text: root.activeService.sanitize(modelData.name || "Unknown")
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
@@ -484,7 +498,7 @@ Panel {
                         if (modelData.isCloud) parts.push("Cloud")
                         else if (modelData.size) parts.push(String(modelData.size))
                         if (modelData.modified) parts.push(String(modelData.modified))
-                        return ollama.sanitize(parts.join(" \u00b7 "))
+                        return root.activeService.sanitize(parts.join(" \u00b7 "))
                       }
                       visible: text !== ""
                       color: root.dim
@@ -502,14 +516,14 @@ Panel {
 
         // ── No models loaded ─────────────────────────────────────────
         PanelSeparator {
-          visible: ollama.running && ollama.runningModels.length === 0
+          visible: root.activeService.running && root.activeService.runningModels.length === 0
           foreground: root.foreground
         }
 
         Text {
-          visible: ollama.running && ollama.runningModels.length === 0
+          visible: root.activeService.running && root.activeService.runningModels.length === 0
           width: parent.width
-          text: ollama.models.length === 0 ? "No local models. Cloud models accessed via API are not listed by Ollama." : "No models currently loaded. Service is idle."
+          text: root.activeService.models.length === 0 ? "No local models. Cloud models accessed via API are not listed by " + root.activeService.backendDisplayName + "." : "No models currently loaded. Service is idle."
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -537,5 +551,90 @@ Panel {
     font.pixelSize: Style.font.bodySmall
     textFormat: Text.PlainText
   }
-}
 
+  // A clickable backend selector: name + live status below, like the
+  // original hero. The active card is highlighted.
+  component BackendCard: Item {
+    required property string name
+    required property string statusText
+    required property color statusColor
+    required property bool active
+    signal clicked()
+    signal hovered(bool on)
+
+    property bool _hover: false
+
+    implicitWidth: Math.max(nameLabel.implicitWidth, statusLabel.implicitWidth) + Style.space(24)
+    implicitHeight: contentCol.implicitHeight + Style.space(14)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.space(6)
+      color: {
+        if (root.cursorActive && root.focusSection === "header" && parent._hover)
+          return Style.hoverBorderFor(root.foreground, Color.accent)
+        if (parent.active)
+          return Style.selectedFillFor(root.foreground, Color.accent)
+        return Style.normalBorderFor(root.foreground, Color.accent)
+      }
+      border.color: parent.active ? root.foreground : Qt.darker(root.foreground, 1.7)
+      border.width: 1
+    }
+
+    Row {
+      id: contentCol
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(6)
+
+      Text {
+        text: "󰚩"
+        color: statusColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.title
+        textFormat: Text.PlainText
+        verticalAlignment: Text.AlignVCenter
+      }
+
+      Column {
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(1)
+
+        Text {
+          id: nameLabel
+          text: name
+          color: statusColor
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.bold: true
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+        }
+
+        Text {
+          id: statusLabel
+          text: statusText.toUpperCase()
+          color: statusColor
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          font.letterSpacing: 1.2
+          textFormat: Text.PlainText
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: { parent._hover = true; parent.hovered(true) }
+      onExited: { parent._hover = false; parent.hovered(false) }
+      onClicked: parent.clicked()
+    }
+  }
+}
