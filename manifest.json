@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "kevano.local-ai-dashboard",
   "name": "Local AI Dashboard",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "kinds": [
     "bar-widget"
   ],
