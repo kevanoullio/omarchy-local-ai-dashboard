@@ -61,6 +61,11 @@ Panel {
     Util.execArgv(["omarchy", "launch", "config", "editor", root.activeService.configPath])
   }
 
+  // Stream the active backend's journal in a new terminal.
+  function openDebug() {
+    Util.execArgv(["omarchy", "launch", "tui"].concat(root.activeService.backendDebugArgs))
+  }
+
   readonly property string statusText: serviceStatus(activeService)
   readonly property color statusColor: serviceStatusColor(activeService)
   readonly property string toggleHint: {
@@ -189,6 +194,7 @@ Panel {
           fontFamily: root.fontFamily
           onConfigRequested: root.openConfig()
           onCreateConfigRequested: root.activeService.createConfigFile()
+          onDebugRequested: root.openDebug()
         }
 
         // ── Running + available models ──────────────────────────────

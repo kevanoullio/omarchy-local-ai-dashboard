@@ -19,6 +19,7 @@ Item {
 
   signal configRequested()
   signal createConfigRequested()
+  signal debugRequested()
 
   implicitHeight: contentCol.implicitHeight
   width: parent ? parent.width : 0
@@ -172,6 +173,16 @@ Item {
           fontFamily: root.fontFamily
           enabled: root.service.hasConfig
           onClicked: root.configRequested()
+        }
+
+        UI.SettingsButton {
+          Layout.columnSpan: 2
+          Layout.fillWidth: true
+          label: "View debug output"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          enabled: root.service.running
+          onClicked: root.debugRequested()
         }
 
         UI.SettingsButton {

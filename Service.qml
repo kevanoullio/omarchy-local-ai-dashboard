@@ -14,6 +14,9 @@ Item {
   readonly property string backendDisplayName: backend === "llama.cpp" ? "llama.cpp" : "ollama"
   readonly property string backendBinary: backend === "llama.cpp" ? "llama-server" : "ollama"
   readonly property string backendService: backend === "llama.cpp" ? "llama.cpp.service" : "ollama.service"
+  readonly property var backendDebugArgs: backend === "llama.cpp"
+    ? ["journalctl", "--user", "-u", "llama.cpp.service", "-f"]
+    : ["journalctl", "-u", "ollama.service", "-f"]
   readonly property int backendPort: backend === "llama.cpp" ? 8080 : 11434
   readonly property string backendHealthEndpoint: backend === "llama.cpp" ? "http://127.0.0.1:8080/health" : "http://127.0.0.1:11434/"
   // llama.cpp self-provisions its env file and user systemd unit on start
