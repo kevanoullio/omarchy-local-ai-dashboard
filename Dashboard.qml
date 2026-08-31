@@ -113,12 +113,12 @@ Panel {
 
   IpcHandler {
     target: root.ipcTarget
-    function open(): void { root.open() }
-    function close(): void { root.close() }
-    function toggle(): void { root.toggle() }
-    function startService(): string { root.activeService.startService(); return "ok" }
-    function stopService(): string { root.activeService.stopService(); return "ok" }
-    function refresh(): string { root.serviceOllama.refresh(); root.serviceLlama.refresh(); return "ok" }
+    function open() { root.open() }
+    function close() { root.close() }
+    function toggle() { root.toggle() }
+    function startService() { root.activeService.startService(); return "ok" }
+    function stopService() { root.activeService.stopService(); return "ok" }
+    function refresh() { root.serviceOllama.refresh(); root.serviceLlama.refresh(); return "ok" }
   }
 
   KeyboardPanel {
