@@ -1,7 +1,7 @@
 # omarchy-local-ai-dashboard
 Monitor and control local AI model services like ollama and llama.cpp from the Omarchy bar. Start and stop systemd background services, view available models with current status, monitor CPU/GPU/DRAM/VRAM usage, stream debug output via a new terminal session, and open config files directly in nvim.
 
-It provides a unified interface for various local backends—including `ollama`, `llama-server`, and `llama-swap`—allowing you to inspect models, adjust service setups, stream terminal logs, and enforce single-service resource isolation. Support for `vLLM` is a planned feature.
+It provides a unified interface for various local backends—including `ollama` and `llama-server`—allowing you to inspect models, adjust service setups, stream terminal logs, and enforce single-service resource isolation. Support for `vLLM` is a planned feature.
 
 This project is an extended derivative work based on `omarchy-ollama-status` by LinuxGamerUK.
 
@@ -59,7 +59,7 @@ registers a `Controller` that loads `Dashboard.qml` on demand. Both the
 - **Dual systemd scope model:** ollama runs as a system-wide daemon (system instance, managed via `pkexec`), while llama.cpp runs as a per-user service (user instance, self-provisioned on first start with no root or polkit required). Both can run side-by-side independently.
 - **Multi-Service Selection Bar:** Displays all installed or configured local AI services at a glance. Easily switch the target view without affecting active background processes.
 - **Single-Active Service Enforcer:** Activating a service automatically initiates a graceful shutdown of any currently running backend and waits for complete resource/VRAM forfeit before starting the target engine.
-- **Tabbed Management Interface:** Organized sub-views for service control, model inventory, live context tracking, and runtime configuration.
+- **Single-panel layout:** Hero cards at top for backend selection + power toggle, followed by a status/details grid and a model inventory list — all in one scrollable panel.
 - **Interactive Terminal Debugging:** One-click action to launch a terminal attached to live systemd or process logs.
 - **Inline Neovim Configuration:** View service config file locations and open them directly in Neovim for editing.
 
@@ -71,13 +71,13 @@ registers a `Controller` that loads `Dashboard.qml` on demand. Both the
 
 The top header presents a horizontal row of available local services. Each service is represented by a single-column, two-row element:
 
-
 ```
 
-+--------------+--------------+--------------+
-| ollama       | llama-server | vLLM         |
-| RUNNING      | STOPPED      | STOPPED      |
-+--------------+--------------+--------------+
+
++--------------+--------------+
+| ollama       | llama.cpp    |
+| RUNNING      | STOPPED      |
++--------------+--------------+
 
 ```
 
@@ -86,45 +86,42 @@ The top header presents a horizontal row of available local services. Each servi
 
 ---
 
-### Lower Section: Tabbed Inspector & Manager
+### Lower Section: Three-Part Vertical Layout
 
-The lower section contains four dedicated tabs to manage and inspect the selected service.
+The lower section is divided into three stacked components in a single scrollable panel.
 
-#### Tab 1: Manage Service
-Handles primary power management and operational health for the selected backend.
+#### Hero Section: Backend Cards + Power Toggle
 
-- **Service & Toggle:** Shows the service name alongside a prominent On/Off toggle switch.
-- **Status:** Displays operational state (`RUNNING` or `STOPPED`).
-- **Version:** Displays the binary or API version string reported by the engine.
-- **Since:** Timestamp recording when the active service was started.
+Two clickable backend selector cards display the current status of each available service, alongside a power toggle switch for the active backend.
 
-#### Tab 2: All Models
-Displays an itemized list of all local models recognized by the selected service engine (e.g., local GGUFs for `llama-server`, pulled models for `ollama`).
+#### Service Details Grid
 
-#### Tab 3: Loaded Model
-Provides real-time telemetry for the currently loaded model instance:
+Displays operational information for the currently selected service in a two-column grid:
 
-- **Model Name:** Currently active model identifier.
-- **Memory (llama.cpp):** The actual full process footprint — measured DRAM
-  working set (the service cgroup's `anon` + `shmem`, i.e. RAM-resident
-  weights, context, compute, and mmproj) added to measured per-service VRAM
-  (`nvidia-smi` on NVIDIA, `rocm-smi` on AMD). Reclaimable file/page cache
-  (the mmap'd `.gguf`) is deliberately excluded so the number reflects
-  committed memory rather than the cached model file. This is the true total
-  memory used, exceeding the raw model file size once context/mmproj are
-  allocated.
-- **Resource Split:** Measured CPU (DRAM) / GPU (VRAM) share of that total:
-  `CPU% = DRAM / (DRAM + VRAM)`, `GPU% = 100 - CPU%`.
-- **Context Meter:** Visual representation of context memory allocated versus used (Context Size / Context Limit).
+- **Status:** `RUNNING` or `STOPPED`
+- **Version:** Version string reported by the engine
+- **API:** The host and port the service is serving on (shown when running)
+- **Latency:** API response latency in milliseconds (shown when reachable, color-coded)
+- **Since:** Timestamp of when the service was started
+- **Configure [Backend]:** Opens the service's config file in Neovim for editing
+- **View debug output:** Spawns a terminal attached to live systemd logs (only available when running)
+- **Create [Backend] config file:** Generates the default config file (only shown when no config exists)
 
-#### Tab 4: Setup
-Provides direct access to runtime parameters, system files, and logging tools.
+#### Model Inventory
 
-- **Debug Output:** Action button to spawn a terminal running live system logs (`journalctl` / `tmux attach`).
-- **Configuration Files:** List of configuration files associated with the service, formatted as:
-  `[File Path] -> [Edit in Neovim]`
-- **Port:** Editable in-line field for the network port assignment.
-- **API Key:** Editable in-line field for local authorization tokens (if configured).
+Displays an itemized list of all local models recognized by the selected service engine. When the service is running, loaded models appear at the top with memory telemetry:
+
+- **Model Name:** Currently active model identifier
+- **Memory:** Full process footprint — measured DRAM working set added to measured per-service VRAM (`nvidia-smi` on NVIDIA, `rocm-smi` on AMD). Reclaimable file/page cache (the mmap'd `.gguf`) is deliberately excluded so the number reflects committed memory rather than the cached model file.
+- **Resource Split:** Measured CPU (DRAM) / GPU (VRAM) share of that total: `CPU% = DRAM / (DRAM + VRAM)`, `GPU% = 100 - CPU%`.
+- **Available models list:** Below loaded models, all available models are listed with indicators for cloud models and running status.
+
+---
+
+## Planned Features
+
+- **vLLM support:** Backend integration for the vLLM inference engine.
+- **Context Meter:** Visual representation of total context used versus total context allocated for the loaded model.
 
 ---
 
