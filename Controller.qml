@@ -8,8 +8,8 @@ Item {
   property var bar: null
   property string activeBackend: "llama.cpp"
 
-  // The owning bar widget. Passed in by the widget so the panel's
-  // `hostWidget` references the real widget (used by Panel IPC,
+  // The owning bar widget. Passed in by the widget so the dashboard's
+  // `hostWidget` references the real widget (used by the dashboard IPC,
   // `bar.switchPanelFrom`, and `KeyboardPanel.owner`).
   property var widgetHost: null
 
@@ -24,7 +24,7 @@ Item {
   Loader {
     id: panelLoader
     active: true
-    source: Qt.resolvedUrl("Panel.qml")
+    source: Qt.resolvedUrl("Dashboard.qml")
     visible: false
     onLoaded: {
       root.injectPanel()

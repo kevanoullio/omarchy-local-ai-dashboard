@@ -15,6 +15,45 @@ This project is an extended derivative work based on `omarchy-ollama-status` by 
 
 ---
 
+## Project Structure
+
+The plugin is split into a `Dashboard.qml` shell that owns all shared state
+(backend selection, cursor/keyboard navigation, `Service` instances) plus a set
+of reusable UI components and per-section files. Each section is "state-in /
+signal-out": it receives data as properties and reports interactions back as
+signals, so the shell remains the single source of truth.
+
+```
+kevano.local-ai-dashboard/
+├── assets/                          # Static assets (icons, etc.)
+├── configs/                         # Per-backend configuration files
+│   ├── llama.env                    #   llama.cpp env template / config
+│   └── ollama.json                  #   ollama JSON config
+├── sections/                        # Dashboard section components
+│   ├── HeroSection.qml              #   Backend cards + power toggle
+│   ├── ServiceDetailsSection.qml    #   Status/version/API grid + configure buttons
+│   └── ModelsSection.qml            #   Running + available model lists
+├── ui/                              # Reusable UI components
+│   ├── BackendCard.qml              #   Clickable backend selector card
+│   ├── InfoLabel.qml                #   Dimmed detail-row label
+│   ├── InfoValue.qml                #   Detail-row value text
+│   └── SettingsButton.qml           #   Full-width config action button
+├── BarWidget.qml                    # Bar icon button (the plugin entry point)
+├── Controller.qml                   # Loads and wires the dashboard panel
+├── Dashboard.qml                    # The panel shell: structure + shared state
+├── Service.qml                      # Backend service model (systemctl/API logic)
+├── LICENSE
+├── manifest.json                    # Plugin metadata + entry point declaration
+└── README.md
+```
+
+`manifest.json` points the bar at `BarWidget.qml` (`entryPoints.barWidget`), which
+registers a `Controller` that loads `Dashboard.qml` on demand. Both the
+`Service.qml` model and the `qs.Ui` panel primitives (`Panel`,
+`KeyboardPanel`, `CursorSurface`, etc.) are reused across the sections.
+
+---
+
 ## Features & Architecture
 
 - **Dual systemd scope model:** ollama runs as a system-wide daemon (system instance, managed via `pkexec`), while llama.cpp runs as a per-user service (user instance, self-provisioned on first start with no root or polkit required). Both can run side-by-side independently.
@@ -89,19 +128,17 @@ Provides direct access to runtime parameters, system files, and logging tools.
 
 ```
 
-2. Register the plugin inside your Omarchy 4 configuration file (`~/.config/omarchy/shell.json`):
+2. Register the plugin by adding it to a `bar.layout` region in your Omarchy 4 configuration file (`~/.config/omarchy/shell.json`). For example, the right region:
 ```json
 {
   "bar": {
-    "widgets": [
-      "omarchy.menu",
-      "omarchy.workspaces",
-      "kevano.local-ai-dashboard",
-      "omarchy.clock"
-    ]
+    "layout": {
+      "right": [
+        { "id": "kevano.local-ai-dashboard" }
+      ]
+    }
   }
 }
-
 ```
 
 

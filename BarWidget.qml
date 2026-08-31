@@ -28,7 +28,7 @@ BarWidget {
 
   onBarChanged: controller.injectPanel()
 
-  DashboardController {
+  Controller {
     id: controller
     bar: root.bar
     widgetHost: root

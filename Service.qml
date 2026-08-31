@@ -25,7 +25,7 @@ Item {
   // on user request via a password prompt. llama.cpp uses a user-editable
   // env file (`configs/llama.env`) read by its user systemd unit via
   // EnvironmentFile=; it is self-provisioned on start. The settings button
-  // in Panel.qml opens `configPath` in the user's editor.
+  // in Dashboard.qml opens `configPath` in the user's editor.
   readonly property string backendConfigFile: backend === "llama.cpp" ? "llama.env" : "ollama.json"
   readonly property string configPath: Qt.resolvedUrl("configs/" + backendConfigFile).toString().replace(/^file:\/\//, "")
   readonly property string defaultConfigJson: '{"host":"127.0.0.1","port":11434,"api-key":""}'
