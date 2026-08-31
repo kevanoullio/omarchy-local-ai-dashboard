@@ -105,7 +105,16 @@ Displays an itemized list of all local models recognized by the selected service
 Provides real-time telemetry for the currently loaded model instance:
 
 - **Model Name:** Currently active model identifier.
-- **Resource Split:** Layer offload ratio between CPU RAM and GPU VRAM.
+- **Memory (llama.cpp):** The actual full process footprint — measured DRAM
+  working set (the service cgroup's `anon` + `shmem`, i.e. RAM-resident
+  weights, context, compute, and mmproj) added to measured per-service VRAM
+  (`nvidia-smi` on NVIDIA, `rocm-smi` on AMD). Reclaimable file/page cache
+  (the mmap'd `.gguf`) is deliberately excluded so the number reflects
+  committed memory rather than the cached model file. This is the true total
+  memory used, exceeding the raw model file size once context/mmproj are
+  allocated.
+- **Resource Split:** Measured CPU (DRAM) / GPU (VRAM) share of that total:
+  `CPU% = DRAM / (DRAM + VRAM)`, `GPU% = 100 - CPU%`.
 - **Context Meter:** Visual representation of context memory allocated versus used (Context Size / Context Limit).
 
 #### Tab 4: Setup

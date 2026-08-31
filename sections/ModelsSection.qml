@@ -18,6 +18,40 @@ Item {
   implicitHeight: contentCol.implicitHeight
   width: parent ? parent.width : 0
 
+  // Render an ollama loaded-model detail line in the same format as
+  // llama.cpp: "<size> | CPU: X% | GPU: Y%". Splits the already-provided
+  // `modelData.processor` string (e.g. "100% CPU", "51%/49% CPU/GPU").
+  // Returns "" when the string can't be parsed so callers can fall back.
+  function ollamaDetailLine(modelData) {
+    var proc = String(modelData && modelData.processor || "").trim()
+    var sizeStr = modelData && modelData.size ? String(modelData.size) : ""
+    var cpu = -1
+    var gpu = -1
+    var m = proc.match(/^(\d+)%\s*\/\s*(\d+)%\s*CPU\/GPU/)
+    if (m) {
+      cpu = parseInt(m[1], 10)
+      gpu = parseInt(m[2], 10)
+    } else {
+      m = proc.match(/^(\d+)%\s*CPU/)
+      if (m) {
+        cpu = parseInt(m[1], 10)
+        gpu = 100 - cpu
+      } else {
+        m = proc.match(/^(\d+)%\s*GPU/)
+        if (m) {
+          gpu = parseInt(m[1], 10)
+          cpu = 100 - gpu
+        }
+      }
+    }
+    if (sizeStr === "" || cpu < 0 || gpu < 0) return ""
+    var parts = []
+    parts.push("Memory: " + sizeStr)
+    parts.push("CPU: " + cpu + "%")
+    parts.push("GPU: " + gpu + "%")
+    return root.service.sanitize(parts.join(" | "))
+  }
+
   Column {
     id: contentCol
     width: parent.width
@@ -88,10 +122,16 @@ Item {
                 Text {
                   Layout.fillWidth: true
                   text: {
-                    var parts = []
-                    if (modelData.size) parts.push(String(modelData.size))
-                    if (modelData.processor) parts.push(String(modelData.processor))
-                    return root.service.sanitize(parts.join(" \u00b7 "))
+                    if (root.service.backend === "llama.cpp") {
+                      var cpuPct = root.service.cpuSplitPercent()
+                      if (cpuPct >= 0) {
+                        return root.service.sanitize("Memory: " + root.service.memoryTotalGB() + " | CPU: " + cpuPct + "% | GPU: " + (100 - cpuPct) + "%")
+                      }
+                      return "Memory unavailable"
+                    }
+                    var ollamaLine = root.ollamaDetailLine(modelData)
+                    if (ollamaLine !== "") return ollamaLine
+                    return "Memory unavailable"
                   }
                   visible: text !== ""
                   color: root.dim
@@ -198,9 +238,9 @@ Item {
                   text: {
                     var parts = []
                     if (modelData.isCloud) parts.push("Cloud")
-                    else if (modelData.size) parts.push(String(modelData.size))
-                    if (modelData.modified) parts.push(String(modelData.modified))
-                    return root.service.sanitize(parts.join(" \u00b7 "))
+                    else if (modelData.size) parts.push("Model size: " + String(modelData.size))
+                    if (modelData.modified) parts.push("Downloaded: " + String(modelData.modified))
+                    return root.service.sanitize(parts.join(" | "))
                   }
                   visible: text !== ""
                   color: root.dim

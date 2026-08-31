@@ -76,6 +76,9 @@ Item {
   // ── Service info ───────────────────────────────────────────────────
   property string activeSince: ""
   property string ollamaVersion: ""
+  property double serviceMemoryBytes: -1  // llama.cpp DRAM: cgroup anon+shmem working set (bytes); double avoids 32-bit int overflow >2 GiB
+  property double serviceVramBytes: -1    // llama.cpp VRAM: per-PID GPU memory (bytes); -1 = unknown
+  property double serviceTotalBytes: -1   // llama.cpp full footprint = DRAM + VRAM; -1 = unknown
 
   // ── Refresh ────────────────────────────────────────────────────────
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 10, 2, 300)
@@ -116,6 +119,8 @@ Item {
   readonly property int capApi: 128        // API health check output
   readonly property int capAction: 512     // start/stop stderr capture
   readonly property int capConfig: 2048    // config file read output
+  readonly property int capServiceMemory: 64  // memory.stat anon+shmem sum (bytes)
+  readonly property int capServiceVram: 64    // nvidia-smi/rocm-smi per-PID value
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -131,6 +136,29 @@ Item {
   }
 
   // ── Sanitize external strings for safe display ──────────────────────
+  function formatGB(bytes) {
+    var b = parseInt(String(bytes), 10)
+    if (!isFinite(b) || b < 0) return "\u2014"
+    var gb = b / (1024 * 1024 * 1024)
+    if (gb >= 1024) return (gb / 1024).toFixed(1) + " TB"
+    return gb.toFixed(1) + " GB"
+  }
+
+  // CPU/GPU split (llama.cpp): CPU = measured DRAM fraction of the full
+  // footprint (DRAM + per-PID VRAM); GPU covers the remainder. Both halves
+  // are measured — no size-based estimate. Returns CPU percent, or -1 when
+  // either measurement is unavailable.
+  function cpuSplitPercent() {
+    if (serviceTotalBytes < 0) return -1
+    return Math.round(serviceMemoryBytes / serviceTotalBytes * 100)
+  }
+
+  // Full llama.cpp memory footprint (DRAM + VRAM) formatted for display,
+  // or "" when unknown.
+  function memoryTotalGB() {
+    return serviceTotalBytes >= 0 ? formatGB(serviceTotalBytes) : ""
+  }
+
   function sanitize(str) {
     return String(str || "").replace(/[<>&]/g, function(c) {
       if (c === "<") return "&lt;"
@@ -204,6 +232,11 @@ Item {
     launch(apiHealthProcess, apiHealthWatchdog)
     launch(listProcess, listWatchdog)
     launch(psProcess, psWatchdog)
+    // llama.cpp: query the user service's current DRAM + VRAM footprint
+    if (backend === "llama.cpp") {
+      launch(serviceMemoryProcess, serviceMemoryWatchdog)
+      launch(serviceVramProcess, serviceVramWatchdog)
+    }
     // Only fetch version once — it never changes during a session
     if (ollamaVersion === "" && !versionProcess.running) {
       launch(versionProcess, versionWatchdog)
@@ -289,6 +322,9 @@ Item {
       runningModels = []
       apiReachable = false
       apiLatencyMs = -1
+      serviceMemoryBytes = -1
+      serviceVramBytes = -1
+      serviceTotalBytes = -1
     }
   }
 
@@ -356,8 +392,24 @@ Item {
       var obj = JSON.parse(raw)
       var data = obj.data || []
       _listModels = []
-      for (var i = 0; i < data.length; i++) {
+      _psModels = []
+      for (var i = 0; i < data.length && _psModels.length < maxRunning; i++) {
         var m = data[i]
+        if (m.status && m.status.value === "loaded") {
+          var loadedName = m.id || "Unknown model"
+          var pathParts = String(loadedName).split("/")
+          var sizeBytes = parseInt(m.meta && m.meta.size, 10)
+          if (!isFinite(sizeBytes) || sizeBytes < 0) sizeBytes = 0
+          _psModels.push({
+            name: truncate(pathParts[pathParts.length - 1] || "Unknown model", 128),
+            id: truncate(m.id || "", 64),
+            size: sizeBytes > 0 ? root.formatGB(sizeBytes) : "",
+            sizeBytes: sizeBytes,
+            processor: truncate(m.status.processor || m.status.backend || "CPU", 32),
+            context: truncate(m.status.context || "", 32),
+            until: "loaded"
+          })
+        }
         _listModels.push({
           name: truncate(m.id || "", 128),
           id: truncate(m.id || "", 64),
@@ -368,8 +420,11 @@ Item {
       }
     } catch(e) {
       _listModels = []
+      _psModels = []
     }
     models = _listModels
+    runningModels = _psModels
+    _psModels = []
     _listHeaderSeen = false
   }
 
@@ -396,6 +451,7 @@ Item {
   }
 
   function _finishPs() {
+    if (root.backend === "llama.cpp") return
     runningModels = _psModels
     _psModels = []
     _psHeaderSeen = false
@@ -464,6 +520,57 @@ Item {
     var latency = parseInt(parts[1], 10)
     apiReachable = (code === 200)
     apiLatencyMs = isFinite(latency) && latency >= 0 ? latency : -1
+  }
+
+  // cgroup memory.stat (anon + shmem) → llama.cpp DRAM working set (bytes), excluding reclaimable page cache
+  property string _serviceMemoryBuffer: ""
+  readonly property int _serviceMemoryBufferMax: 64
+
+  function _onServiceMemoryLine(line) {
+    var s = String(line || "")
+    if (_serviceMemoryBuffer.length + s.length + 1 <= _serviceMemoryBufferMax) {
+      _serviceMemoryBuffer += s + "\n"
+    }
+  }
+
+  function _finishServiceMemory() {
+    var raw = truncate(_serviceMemoryBuffer.trim(), _serviceMemoryBufferMax)
+    _serviceMemoryBuffer = ""
+    var n = parseInt(raw.split("\n")[0], 10)
+    serviceMemoryBytes = isFinite(n) && n >= 0 ? n : -1
+    _deriveServiceTotal()
+  }
+
+  // nvidia-smi/rocm-smi → llama.cpp per-PID VRAM footprint
+  property string _serviceVramBuffer: ""
+  readonly property int _serviceVramBufferMax: 64
+
+  function _onServiceVramLine(line) {
+    var s = String(line || "")
+    if (_serviceVramBuffer.length + s.length + 1 <= _serviceVramBufferMax) {
+      _serviceVramBuffer += s + "\n"
+    }
+  }
+
+  function _finishServiceVram() {
+    var raw = truncate(_serviceVramBuffer.trim(), _serviceVramBufferMax)
+    _serviceVramBuffer = ""
+    // The query emits the "used_memory" column (e.g. "64 MiB"); any sentinel
+    // (empty / non-numeric / "N/A") means no measurable GPU context → unknown.
+    var m = raw.match(/(\d+(?:\.\d+)?)\s*MiB/)
+    var n = m ? Math.round(parseFloat(m[1]) * 1024 * 1024) : -1
+    serviceVramBytes = n >= 0 ? n : -1
+    _deriveServiceTotal()
+  }
+
+  // Full footprint = measured DRAM + measured per-PID VRAM. Unknown when
+  // either half hasn't resolved.
+  function _deriveServiceTotal() {
+    if (serviceMemoryBytes >= 0 && serviceVramBytes >= 0) {
+      serviceTotalBytes = serviceMemoryBytes + serviceVramBytes
+    } else {
+      serviceTotalBytes = -1
+    }
   }
 
   // ── Config file → JSON → state ──────────────────────────────────────
@@ -633,6 +740,7 @@ Item {
         else _finishList()
       } else {
         _listModels = []; _listHeaderSeen = false
+        if (root.backend === "llama.cpp") runningModels = []
       }
     }
   }
@@ -678,6 +786,59 @@ Item {
     onExited: function(exitCode) {
       configWatchdog.stop()
       _parseConfigBuffer()
+    }
+  }
+
+  // llama.cpp user service → current DRAM working set (bytes). Sums anon+shmem
+  // from the service cgroup's memory.stat: committed, non-reclaimable process
+  // memory. MemoryCurrent is avoided because it also counts reclaimable
+  // file/page cache (the mmap'd GGUF), which inflates the footprint and
+  // double-counts weight pages already held as anon or on the GPU.
+  Process {
+    id: serviceMemoryProcess
+    running: false
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c",
+              "cg=$(systemctl --user show " + root.backendService.replace('.service', '') + " --property=ControlGroup --value 2>/dev/null); " +
+              "out=\"\"; " +
+              "[ -n \"$cg\" ] && [ -r \"/sys/fs/cgroup$cg/memory.stat\" ] && out=$(awk '$1==\"anon\"{a=$2}$1==\"shmem\"{s=$2}END{print (a+0)+(s+0)}' \"/sys/fs/cgroup$cg/memory.stat\" 2>/dev/null); " +
+              "[ -z \"$out\" ] && out=$(systemctl --user show " + root.backendService.replace('.service', '') + " --property=MemoryCurrent --value 2>/dev/null); " +
+              "[ -n \"$out\" ] || out=0; " +
+              "echo \"$out\" | head -c " + root.capServiceMemory]
+    stdout: SplitParser { onRead: function(line) { root._onServiceMemoryLine(line) } }
+    onExited: function(exitCode) {
+      serviceMemoryWatchdog.stop()
+      if (exitCode === 0) _finishServiceMemory()
+      else { _serviceMemoryBuffer = ""; serviceMemoryBytes = -1; _deriveServiceTotal() }
+    }
+  }
+
+  // llama.cpp user service → current per-service VRAM footprint (bytes).
+  // Vendor auto-detected: nvidia-smi on NVIDIA, rocm-smi on AMD. The preset
+  // server forks per-model workers that own the CUDA contexts, so GPU memory
+  // is summed over every PID in the service cgroup (MainPID as fallback seed),
+  // not just MainPID. When the model has no GPU context (idle/unloaded) or no
+  // supported GPU tool exists, the query emits nothing and serviceVramBytes
+  // stays -1 → CPU-only/unknown fallback.
+  Process {
+    id: serviceVramProcess
+    running: false
+    command: ["timeout", "-k", "2", "" + processTimeoutSec,
+              "bash", "-c",
+              "cg=$(systemctl --user show " + root.backendService.replace('.service', '') + " --property=ControlGroup --value 2>/dev/null); " +
+              "pid=$(systemctl --user show " + root.backendService.replace('.service', '') + " --property=MainPID --value); " +
+              "pids=\"$pid\"; [ -n \"$cg\" ] && [ -r \"/sys/fs/cgroup$cg/cgroup.procs\" ] && pids=\"$(tr '\\n' ' ' < \"/sys/fs/cgroup$cg/cgroup.procs\") $pid\"; " +
+              "if command -v nvidia-smi >/dev/null 2>&1; then " +
+              "nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null | " +
+              "awk -F',' -v ps=\"$pids\" 'BEGIN{n=split(ps,a,\" \");for(i=1;i<=n;i++)if(a[i]!=\"\")seen[a[i]]=1}{gsub(/[ \\t]/,\"\",$1);gsub(/[ \\t]/,\"\",$2);if(($1 in seen)&&$2~/^[0-9]+$/){sum+=$2;c++}}END{if(c>0)print sum\" MiB\"}'; " +
+              "elif command -v rocm-smi >/dev/null 2>&1; then " +
+              "rocm-smi --showmeminfo vram 2>/dev/null | head -2; " +
+              "fi | head -c " + root.capServiceVram]
+    stdout: SplitParser { onRead: function(line) { root._onServiceVramLine(line) } }
+    onExited: function(exitCode) {
+      serviceVramWatchdog.stop()
+      if (exitCode === 0) _finishServiceVram()
+      else { _serviceVramBuffer = ""; serviceVramBytes = -1; _deriveServiceTotal() }
     }
   }
 
@@ -849,6 +1010,20 @@ Item {
     interval: watchdogMs
     repeat: false
     onTriggered: reap(configProcess, configWatchdog)
+  }
+
+  Timer {
+    id: serviceMemoryWatchdog
+    interval: watchdogMs
+    repeat: false
+    onTriggered: reap(serviceMemoryProcess, serviceMemoryWatchdog)
+  }
+
+  Timer {
+    id: serviceVramWatchdog
+    interval: watchdogMs
+    repeat: false
+    onTriggered: reap(serviceVramProcess, serviceVramWatchdog)
   }
 
   Timer {
