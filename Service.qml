@@ -11,22 +11,28 @@ Item {
   // ── Backend selection ────────────────────────────────────────────────
   property string backend: "ollama"  // "ollama" | "llama.cpp"
 
-  readonly property string backendDisplayName: backend === "llama.cpp" ? "llama.cpp" : "Ollama"
+  readonly property string backendDisplayName: backend === "llama.cpp" ? "llama.cpp" : "ollama"
   readonly property string backendBinary: backend === "llama.cpp" ? "llama-server" : "ollama"
   readonly property string backendService: backend === "llama.cpp" ? "llama.cpp.service" : "ollama.service"
   readonly property int backendPort: backend === "llama.cpp" ? 8080 : 11434
   readonly property string backendHealthEndpoint: backend === "llama.cpp" ? "http://127.0.0.1:8080/health" : "http://127.0.0.1:11434/"
+  // llama.cpp self-provisions its env file and user systemd unit on start
+  // (no root/polkit); ollama is managed via the system instance + JSON config.
+  readonly property bool selfManaged: backend === "llama.cpp"
 
   // ── Per-backend config file ─────────────────────────────────────────
-  // JSON config in the plugin `configs/` directory, editable by the user
-  // (see the settings button in Panel.qml). Lazy-created with defaults if
-  // missing, read on startup. Key order: host, port, api-key, then any
-  // backend-specific keys.
-  readonly property string backendConfigFile: backend === "llama.cpp" ? "llama.cpp.json" : "ollama.json"
+  // ollama uses a JSON config in the plugin `configs/` directory, written
+  // on user request via a password prompt. llama.cpp uses a user-editable
+  // env file (`configs/llama.env`) read by its user systemd unit via
+  // EnvironmentFile=; it is self-provisioned on start. The settings button
+  // in Panel.qml opens `configPath` in the user's editor.
+  readonly property string backendConfigFile: backend === "llama.cpp" ? "llama.env" : "ollama.json"
   readonly property string configPath: Qt.resolvedUrl("configs/" + backendConfigFile).toString().replace(/^file:\/\//, "")
-  readonly property string defaultConfigJson: backend === "llama.cpp"
-    ? '{"host":"127.0.0.1","port":8080,"api-key":"","models-preset":"~/.config/llama.cpp/models.ini","models-max":1}'
-    : '{"host":"127.0.0.1","port":11434,"api-key":""}'
+  readonly property string defaultConfigJson: '{"host":"127.0.0.1","port":11434,"api-key":""}'
+  // Default llama.cpp env file. Written via an unquoted heredoc so $HOME
+  // expands to the absolute preset path at write time (systemd does no
+  // tilde/var expansion inside env files).
+  readonly property string llamaEnvDefault: '# llama.cpp server configuration\n# Managed by local-ai-dashboard. Edit values, then start/restart from the panel.\nLLAMA_HOST=127.0.0.1\nLLAMA_PORT=8080\nLLAMA_API_KEY=\nLLAMA_MODELS_PRESET="$HOME/.config/llama.cpp/models.ini"\nLLAMA_MODELS_MAX=1\nLLAMA_EXTRA_ARGS=\n'
 
   property string configHost: "127.0.0.1"
   property int configPort: 0
@@ -50,6 +56,7 @@ Item {
   property bool hasService: false      // systemd unit file exists
   property bool running: false
   property bool busy: false
+  property bool hasConfig: false       // plugin config file exists
   property string actionLabel: ""
   property string lastError: ""
 
@@ -144,8 +151,9 @@ Item {
   // explicit denial — and surface actionable text instead of raw output.
   function _actionError(output, verb) {
     var s = String(output || "").trim()
+    var verbDisplay = verb === "start" ? "Start" : verb === "create" ? "Create" : "Stop"
     if (/request dismissed|dismissed by user|was not shown|cancelled|canceled/i.test(s)) {
-      return (verb === "start" ? "Start": "Stop") + " cancelled — authentication was dismissed."
+      return verbDisplay + " cancelled — authentication was dismissed."
     }
     if (/not authorized|permission denied|access denied/i.test(s)) {
       return "Cannot " + verb + " " + root.backendDisplayName + ": you are not authorized to manage system services."
@@ -200,7 +208,9 @@ Item {
   }
 
   function startService() {
-    if (busy || !installed || !hasService) return
+    // Start: llama.cpp self-provisions env + unit, so only needs the binary installed.
+    if (busy || !installed) return
+    if (backend === "ollama" && (!hasService || !hasConfig)) return
     busy = true
     actionLabel = "Starting " + root.backendDisplayName + "…"
     lastError = ""
@@ -209,12 +219,28 @@ Item {
   }
 
   function stopService() {
-    if (busy || !installed || !hasService) return
+    // Stop: llama.cpp needs its user unit to exist.
+    if (busy || !installed) return
+    if (backend === "ollama" && (!hasService || !hasConfig)) return
+    if (backend === "llama.cpp" && !hasService) return
     busy = true
     actionLabel = "Stopping " + root.backendDisplayName + "…"
     lastError = ""
     stopProcess.running = true
     stopActionWatchdog.restart()
+  }
+
+  // Write the default config file: a password prompt for ollama, plain bash
+  // for llama.cpp. Guarded by `!hasConfig` so an existing file is never
+  // overwritten; on success the file is re-read so the config values and
+  // hasConfig update immediately.
+  function createConfigFile() {
+    if (busy || hasConfig) return
+    busy = true
+    actionLabel = "Creating " + root.backendDisplayName + " config…"
+    lastError = ""
+    createConfigProcess.running = true
+    createConfigWatchdog.restart()
   }
 
   function toggleService() {
@@ -340,6 +366,7 @@ Item {
     } catch(e) {
       _listModels = []
     }
+    models = _listModels
     _listHeaderSeen = false
   }
 
@@ -450,20 +477,56 @@ Item {
   function _parseConfigBuffer() {
     var raw = truncate(_configBuffer.trim(), _configBufferMax)
     _configBuffer = ""
-    try {
-      var obj = JSON.parse(raw)
-      configHost = String(obj["host"] || "127.0.0.1")
-      var p = parseInt(obj["port"], 10)
-      configPort = isFinite(p) && p > 0 ? p : 0
-      configApiKey = String(obj["api-key"] || "")
-    } catch(e) {
+    var newline = raw.indexOf("\n")
+    var first = newline !== -1 ? raw.substring(0, newline).trim() : raw
+    var body = newline !== -1 ? raw.substring(newline + 1) : ""
+    hasConfig = first === "HAS"
+    if (!hasConfig) {
       configHost = "127.0.0.1"
       configPort = 0
       configApiKey = ""
+      return
+    }
+    if (backend === "llama.cpp") {
+      var host = "127.0.0.1"
+      var port = 0
+      var apiKey = ""
+      var envLines = body.split("\n")
+      for (var i = 0; i < envLines.length; i++) {
+        var line = String(envLines[i]).replace(/^\s+|\s+$/g, "")
+        if (line === "" || line.charAt(0) === "#") continue
+        var eq = line.indexOf("=")
+        if (eq === -1) continue
+        var key = line.substring(0, eq).replace(/^\s+|\s+$/g, "")
+        var val = line.substring(eq + 1).replace(/^\s+|\s+$/g, "").replace(/^"(.*)"$/, "$1")
+        if (key === "LLAMA_HOST") host = val !== "" ? val : "127.0.0.1"
+        else if (key === "LLAMA_PORT") {
+          var p = parseInt(val, 10)
+          port = isFinite(p) && p > 0 ? p : 0
+        } else if (key === "LLAMA_API_KEY") apiKey = val
+      }
+      configHost = host
+      configPort = port
+      configApiKey = apiKey
+    } else {
+      try {
+        var obj = JSON.parse(body)
+        configHost = String(obj["host"] || "127.0.0.1")
+        var p = parseInt(obj["port"], 10)
+        configPort = isFinite(p) && p > 0 ? p : 0
+        configApiKey = String(obj["api-key"] || "")
+      } catch(e) {
+        configHost = "127.0.0.1"
+        configPort = 0
+        configApiKey = ""
+      }
     }
   }
 
-  // Lazily create the config file with defaults, then read it back.
+  // Read-only startup probe: reports whether the config file exists (HAS/NO)
+  // as the first output line and, if so, the file contents after it. Never
+  // creates or modifies the file — creation is user-initiated via
+  // createConfigFile().
   function ensureAndReadConfig() {
     launch(configProcess, configWatchdog)
   }
@@ -508,7 +571,7 @@ Item {
     id: checkServiceProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; systemctl list-unit-files " + root.backendService + " --no-legend 2>&1 | head -c " + root.capCheck]
+              "bash", "-c", "set -o pipefail; systemctl" + (root.backend === "llama.cpp" ? " --user" : "") + " list-unit-files " + root.backendService + " --no-legend 2>&1 | head -c " + root.capCheck]
     stdout: SplitParser { onRead: function(line) { root._onCheckLine(line) } }
     onExited: function(exitCode) {
       checkServiceWatchdog.stop()
@@ -521,7 +584,7 @@ Item {
     id: serviceProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; systemctl show " + root.backendService.replace('.service', '') + " --property=ActiveState,SubState,ActiveEnterTimestamp 2>&1 | head -c " + root.capService]
+              "bash", "-c", "set -o pipefail; systemctl" + (root.backend === "llama.cpp" ? " --user" : "") + " show " + root.backendService.replace('.service', '') + " --property=ActiveState,SubState,ActiveEnterTimestamp 2>&1 | head -c " + root.capService]
     stdout: SplitParser { onRead: function(line) { root._onServiceLine(line) } }
     onExited: function(exitCode) {
       serviceWatchdog.stop()
@@ -599,12 +662,15 @@ Item {
     }
   }
 
-  // Config file: lazily create it with defaults if missing, then read it.
+  // Config file: read-only probe. Emits a single HAS/NO marker line before
+  // the file contents, so hasConfig is set even when the JSON is unparseable.
+  // The pipeline runs without pipefail so `head -c` always exits 0 — a config
+  // larger than capConfig truncates instead of being discarded.
   Process {
     id: configProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "f='" + root.configPath + "'; if [ ! -f \"$f\" ]; then printf '%s' '" + root.defaultConfigJson + "' > \"$f\"; fi; cat \"$f\" | head -c " + root.capConfig]
+              "bash", "-c", "f='" + root.configPath + "'; { if [ -f \"$f\" ]; then echo HAS; cat \"$f\"; else echo NO; fi; } 2>/dev/null | head -c " + root.capConfig]
     stdout: SplitParser { onRead: function(line) { root._onConfigLine(line) } }
     onExited: function(exitCode) {
       configWatchdog.stop()
@@ -612,9 +678,10 @@ Item {
     }
   }
 
-  // ── Start/stop stderr capture ──────────────────────────────────────
+  // ── Start/stop/create stderr capture ──────────────────────────────
   property string _startBuffer: ""
   property string _stopBuffer: ""
+  property string _createBuffer: ""
 
   function _onStartLine(line) {
     var s = String(line || "")
@@ -626,18 +693,49 @@ Item {
     if (_stopBuffer.length + s.length + 1 <= capAction) _stopBuffer += s + "\n"
   }
 
+  function _onCreateLine(line) {
+    var s = String(line || "")
+    if (_createBuffer.length + s.length + 1 <= capAction) _createBuffer += s + "\n"
+  }
+
   Process {
     id: startProcess
     running: false
-    command: ["timeout", "-k", "2", "" + startTimeoutSec,
-              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl start " + root.backendService + " 2>&1 | head -c " + root.capAction]
+    command: {
+      var script
+      if (root.backend === "llama.cpp") {
+        // Self-provision: env file + user unit, then start. One bash -c so
+        // stderr is captured; set -e fail-fast; pipefail + head preserve the
+        // real exit code into _startBuffer -> _actionError.
+        script = "set -o pipefail; { set -e; d=$(dirname \"" + root.configPath + "\"); " +
+          "ud=\"${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user\"; mkdir -p \"$d\" \"$ud\"; f=\"" + root.configPath + "\"; " +
+          "if [ ! -f \"$f\" ]; then cat > \"$f\" <<ENV\n" + root.llamaEnvDefault + "ENV\nfi; " +
+          "bin=$(command -v " + root.backendBinary + "); " +
+          "cat > \"$ud/llama.cpp.service\" <<UNIT\n" +
+          "[Unit]\nDescription=llama.cpp server (managed by local-ai-dashboard)\nAfter=network.target\n\n" +
+          "[Service]\nType=simple\nEnvironmentFile=$f\n" +
+          "ExecStart=/bin/bash -c 'exec \"$bin\" --host \"\\${LLAMA_HOST:-127.0.0.1}\" --port \"\\${LLAMA_PORT:-8080}\" " +
+          "--models-preset \"\\${LLAMA_MODELS_PRESET}\" --models-max \"\\${LLAMA_MODELS_MAX:-1}\" \\${LLAMA_EXTRA_ARGS}'\n" +
+          "Restart=on-failure\n\n[Install]\nWantedBy=default.target\nUNIT\n" +
+          "systemctl --user daemon-reload; systemctl --user start llama.cpp.service; } 2>&1 | head -c " + root.capAction
+      } else {
+        script = "set -o pipefail; pkexec /usr/bin/systemctl start " + root.backendService + " 2>&1 | head -c " + root.capAction
+      }
+      return ["timeout", "-k", "2", "" + root.startTimeoutSec, "bash", "-c", script]
+    }
     stdout: SplitParser { onRead: function(line) { root._onStartLine(line) } }
     onExited: function(exitCode) {
       startActionWatchdog.stop()
       busy = false
       actionLabel = ""
       if (exitCode !== 0) lastError = _actionError(_startBuffer, "start")
-      else lastError = ""
+      else {
+        lastError = ""
+        if (root.backend === "llama.cpp") {
+          hasConfig = true
+          launch(configProcess, configWatchdog)
+        }
+      }
       _startBuffer = ""
       startDelay.restart()
     }
@@ -647,7 +745,9 @@ Item {
     id: stopProcess
     running: false
     command: ["timeout", "-k", "2", "" + processTimeoutSec,
-              "bash", "-c", "set -o pipefail; pkexec /usr/bin/systemctl stop " + root.backendService + " 2>&1 | head -c " + root.capAction]
+              "bash", "-c", root.backend === "llama.cpp"
+                ? "set -o pipefail; systemctl --user stop llama.cpp.service 2>&1 | head -c " + root.capAction
+                : "set -o pipefail; pkexec /usr/bin/systemctl stop " + root.backendService + " 2>&1 | head -c " + root.capAction]
     stdout: SplitParser { onRead: function(line) { root._onStopLine(line) } }
     onExited: function(exitCode) {
       stopActionWatchdog.stop()
@@ -657,6 +757,33 @@ Item {
       else lastError = ""
       _stopBuffer = ""
       refresh()
+    }
+  }
+
+  // Default config file creation. llama.cpp: plain bash, no pkexec — mkdir -p
+  // the config dir then write the env template only if missing. ollama keeps
+  // its single password prompt that writes the default JSON (stderr captured
+  // and classified by _actionError just like start/stop).
+  Process {
+    id: createConfigProcess
+    running: false
+    command: ["timeout", "-k", "2", "" + startTimeoutSec,
+              "bash", "-c", root.backend === "llama.cpp"
+                ? "set -o pipefail; f='" + root.configPath + "'; { mkdir -p \"$(dirname \"$f\")\"; if [ ! -f \"$f\" ]; then cat > \"$f\" <<ENV\n" + root.llamaEnvDefault + "ENV\nfi; } 2>&1 | head -c " + root.capAction
+                : "set -o pipefail; f='" + root.configPath + "'; pkexec /usr/bin/bash -c 'mkdir -p \"$(dirname \"$1\")\" && printf \"%s\" \"$2\" > \"$1\"' bash \"$f\" '" + root.defaultConfigJson + "' 2>&1 | head -c " + root.capAction]
+    stdout: SplitParser { onRead: function(line) { root._onCreateLine(line) } }
+    onExited: function(exitCode) {
+      createConfigWatchdog.stop()
+      busy = false
+      actionLabel = ""
+      if (exitCode !== 0) {
+        lastError = _actionError(_createBuffer, "create")
+      } else {
+        lastError = ""
+        hasConfig = true
+        launch(configProcess, configWatchdog)
+      }
+      _createBuffer = ""
     }
   }
 
@@ -733,6 +860,13 @@ Item {
     interval: watchdogMs
     repeat: false
     onTriggered: if (stopProcess.running) stopProcess.running = false
+  }
+
+  Timer {
+    id: createConfigWatchdog
+    interval: startWatchdogMs
+    repeat: false
+    onTriggered: if (createConfigProcess.running) createConfigProcess.running = false
   }
 
   // ── Refresh timers ─────────────────────────────────────────────────

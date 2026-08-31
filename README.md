@@ -1,7 +1,7 @@
 # omarchy-local-ai-dashboard
-Monitor and control local ai model services like ollama/llama-server/vllm from the Omarchy bar. Start and stop the systemd background service, view available models with current model status, monitor CPU/GPU/DRAM/VRAM usage, with quick access to view debug output via a new terminal session, and one click open your config files via nvim.
+Monitor and control local AI model services like ollama and llama.cpp from the Omarchy bar. Start and stop systemd background services, view available models with current status, monitor CPU/GPU/DRAM/VRAM usage, stream debug output via a new terminal session, and open config files directly in nvim.
 
-It provides a unified interface for various local backends—including `Ollama`, `llama-server`, `llama-swap`, and `vLLM`, allowing you to inspect models, adjust service setups, stream terminal logs, and enforce single-service resource isolation.
+It provides a unified interface for various local backends—including `ollama`, `llama-server`, and `llama-swap`—allowing you to inspect models, adjust service setups, stream terminal logs, and enforce single-service resource isolation. Support for `vLLM` is a planned feature.
 
 This project is an extended derivative work based on `omarchy-ollama-status` by LinuxGamerUK.
 
@@ -17,6 +17,7 @@ This project is an extended derivative work based on `omarchy-ollama-status` by 
 
 ## Features & Architecture
 
+- **Dual systemd scope model:** ollama runs as a system-wide daemon (system instance, managed via `pkexec`), while llama.cpp runs as a per-user service (user instance, self-provisioned on first start with no root or polkit required). Both can run side-by-side independently.
 - **Multi-Service Selection Bar:** Displays all installed or configured local AI services at a glance. Easily switch the target view without affecting active background processes.
 - **Single-Active Service Enforcer:** Activating a service automatically initiates a graceful shutdown of any currently running backend and waits for complete resource/VRAM forfeit before starting the target engine.
 - **Tabbed Management Interface:** Organized sub-views for service control, model inventory, live context tracking, and runtime configuration.
@@ -35,7 +36,7 @@ The top header presents a horizontal row of available local services. Each servi
 ```
 
 +--------------+--------------+--------------+
-| Ollama       | llama-server | vLLM         |
+| ollama       | llama-server | vLLM         |
 | RUNNING      | STOPPED      | STOPPED      |
 +--------------+--------------+--------------+
 
@@ -59,7 +60,7 @@ Handles primary power management and operational health for the selected backend
 - **Since:** Timestamp recording when the active service was started.
 
 #### Tab 2: All Models
-Displays an itemized list of all local models recognized by the selected service engine (e.g., local GGUFs for `llama-server`, pulled models for `Ollama`).
+Displays an itemized list of all local models recognized by the selected service engine (e.g., local GGUFs for `llama-server`, pulled models for `ollama`).
 
 #### Tab 3: Loaded Model
 Provides real-time telemetry for the currently loaded model instance:
@@ -108,12 +109,31 @@ Provides direct access to runtime parameters, system files, and logging tools.
 
 ---
 
+## Service Architecture
+
+### ollama — system instance
+
+ollama is installed as a system-wide daemon (`/usr/lib/systemd/system/ollama.service`) that runs under a dedicated `ollama` user, stores models in `/usr/share/ollama`, and serves on a static port. The dashboard manages it via the **system** systemd instance using `pkexec` (which triggers a graphical polkit authentication prompt).
+
+### llama.cpp — user instance
+
+llama.cpp is designed as a flexible, developer-focused binary. Users frequently change parameter flags, swap local model files, adjust VRAM layer offloading, and edit preset `.ini` files. This per-user workflow aligns naturally with **user-scoped** systemd services.
+
+When you toggle llama.cpp on for the first time, the plugin self-provisions both its configuration file (`configs/llama.env`) and its user service unit (`~/.config/systemd/user/llama.cpp.service`) automatically — no root privileges or polkit authentication required.
+
+### Side-by-side operation
+
+The two services live in separate systemd scopes (system vs. user instance), so they can run simultaneously without conflict. The dashboard's single-active enforcer handles switching between them when needed.
+
+---
+
 ## Dependencies
 
 The dashboard relies on standard Linux utilities to query local APIs and manage background units:
 
 * `curl` and `jq` for API response handling.
-* `systemd` user service manager (or process supervisor).
+* `systemd` (both system and user service instances).
+* A polkit authentication agent for managing ollama's system-level service via `pkexec` (Omarchy ships one by default).
 * `nvim` for inline file editing.
 * Your preferred terminal emulator (e.g., `kitty`, `foot`) for log streaming.
 

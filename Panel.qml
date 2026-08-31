@@ -31,14 +31,17 @@ Panel {
   function serviceStatus(svc) {
     if (svc.busy) return svc.actionLabel
     if (!svc.installed) return "Not installed"
-    if (!svc.hasService) return "No service"
+    if (!svc.hasService) {
+      if (svc.selfManaged) return "Configured"
+      return "No service"
+    }
     return svc.running ? "Running" : "Stopped"
   }
 
   function serviceStatusColor(svc) {
     if (svc.busy) return foreground
     if (!svc.installed) return urgent
-    if (!svc.hasService) return urgent
+    if (!svc.hasService) return svc.selfManaged ? foreground : urgent
     if (svc.running) return Color.accent
     return foreground
   }
@@ -62,7 +65,10 @@ Panel {
   readonly property string toggleHint: {
     var s = activeService
     if (!s.installed) return ""
-    if (!s.hasService) return "See setup instructions below"
+    if (!s.hasService) {
+      if (s.selfManaged) return "Ready \u2014 start creates config & service"
+      return "See setup instructions below"
+    }
     if (s.running) return "Turn " + s.backendDisplayName + " off"
     return "Turn " + s.backendDisplayName + " on"
   }
@@ -167,7 +173,7 @@ Panel {
               Layout.fillWidth: true
               Layout.preferredWidth: Style.space(150)
               Layout.minimumWidth: Style.space(110)
-              name: "Llama.cpp"
+              name: "llama.cpp"
               statusText: root.serviceStatus(root.serviceLlama)
               statusColor: root.serviceStatusColor(root.serviceLlama)
               active: root.activeBackend === "llama.cpp"
@@ -179,7 +185,7 @@ Panel {
               Layout.fillWidth: true
               Layout.preferredWidth: Style.space(150)
               Layout.minimumWidth: Style.space(110)
-              name: "Ollama"
+              name: "ollama"
               statusText: root.serviceStatus(root.serviceOllama)
               statusColor: root.serviceStatusColor(root.serviceOllama)
               active: root.activeBackend === "ollama"
@@ -192,9 +198,11 @@ Panel {
               Layout.alignment: Qt.AlignVCenter
               Layout.fillWidth: false
               Layout.minimumWidth: implicitWidth
-              visible: root.activeService.installed && root.activeService.hasService
+              visible: root.activeService.installed && (root.activeService.hasService || root.activeService.selfManaged)
               checked: root.activeService.running
               busy: root.activeService.busy
+              enabled: root.activeService.selfManaged || root.activeService.hasConfig
+              opacity: (root.activeService.selfManaged || root.activeService.hasConfig) ? 1.0 : 0.5
               hasCursor: root.cursorActive && root.focusSection === "header"
               foreground: root.foreground
               onHovered: function(on) { if (on) { root.cursorActive = true; root.focusSection = "header" } }
@@ -245,7 +253,7 @@ Panel {
 
         // ── No service ────────────────────────────────────────────────
         CursorSurface {
-          visible: root.activeService.installed && !root.activeService.hasService
+          visible: root.activeService.installed && !root.activeService.hasService && !root.activeService.selfManaged
           width: parent.width
           implicitHeight: noServiceText.implicitHeight + Style.spacing.rowPaddingX
           foreground: root.foreground
@@ -267,7 +275,7 @@ Panel {
 
         // ── Service details ─────────────────────────────────────────
         Column {
-          visible: root.activeService.installed && root.activeService.hasService
+          visible: root.activeService.installed && (root.activeService.hasService || root.activeService.selfManaged)
           width: parent.width
           spacing: Style.spacing.labelGap
 
@@ -294,14 +302,18 @@ Panel {
             }
             InfoValue {
               visible: root.activeService.running
-              text: {
-                if (!root.activeService.apiReachable) return "\u2014"
-                if (root.activeService.apiLatencyMs >= 0)
-                  return "Port: " + root.activeService.effectivePort + " | Latency: " + root.activeService.apiLatencyMs + " ms"
-                return "Port: " + root.activeService.effectivePort
-              }
+              text: root.activeService.apiReachable ? root.activeService.effectiveHost + ":" + root.activeService.effectivePort : "\u2014"
+              color: !root.activeService.apiReachable ? root.urgent : root.foreground
+            }
+
+            InfoLabel {
+              visible: root.activeService.running && root.activeService.apiReachable
+              text: "Latency"
+            }
+            InfoValue {
+              visible: root.activeService.running && root.activeService.apiReachable
+              text: root.activeService.apiLatencyMs >= 0 ? root.activeService.apiLatencyMs + " ms" : "\u2014"
               color: {
-                if (!root.activeService.apiReachable) return root.urgent
                 if (root.activeService.apiLatencyMs > 500) return root.urgent
                 if (root.activeService.apiLatencyMs > 200) return Color.accent
                 return root.foreground
@@ -321,7 +333,16 @@ Panel {
               Layout.columnSpan: 2
               Layout.fillWidth: true
               label: "Configure " + root.activeService.backendDisplayName
+              enabled: root.activeService.hasConfig
               onClicked: root.openConfig()
+            }
+
+            SettingsButton {
+              Layout.columnSpan: 2
+              Layout.fillWidth: true
+              visible: !root.activeService.hasConfig
+              label: "Create " + root.activeService.backendDisplayName + " config file"
+              onClicked: root.activeService.createConfigFile()
             }
 
           }
@@ -645,10 +666,12 @@ Panel {
   }
 
   // A simple full-width button that opens the backend's config file in the
-  // user's editor/terminal (via `omarchy launch config editor`).
+  // user's editor/terminal (via `omarchy launch config editor`). `enabled`
+  // dims the button and ignores clicks.
   component SettingsButton: Item {
     id: sb
     required property string label
+    property bool enabled: true
     signal clicked()
 
     property bool _hover: false
@@ -658,11 +681,12 @@ Panel {
     Rectangle {
       anchors.fill: parent
       radius: Style.space(4)
-      color: sb._hover
+      color: (sb.enabled && sb._hover)
         ? Style.hoverBorderFor(root.foreground, Color.accent)
         : Style.normalBorderFor(root.foreground, Color.accent)
       border.color: Qt.darker(root.foreground, 1.7)
       border.width: 1
+      opacity: sb.enabled ? 1.0 : 0.5
     }
 
     Text {
@@ -679,10 +703,12 @@ Panel {
       textFormat: Text.PlainText
       horizontalAlignment: Text.AlignHCenter
       elide: Text.ElideRight
+      opacity: sb.enabled ? 1.0 : 0.5
     }
 
     MouseArea {
       anchors.fill: parent
+      enabled: sb.enabled
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onEntered: sb._hover = true
