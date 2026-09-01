@@ -127,12 +127,23 @@ Displays an itemized list of all local models recognized by the selected service
 
 ## Installation & Setup
 
+### Method A — CLI (Recommended)
+
+Run the following command to clone and enable the plugin in one step:
+
+```bash
+omarchy plugin add https://github.com/kevanoullio/kevano.local-ai-dashboard.git --enable
+```
+
+This clones the repo into `~/.config/omarchy/plugins/kevano.local-ai-dashboard` and registers the plugin automatically.
+
+### Method B — Manual
+
 1. Clone this repository into your Omarchy plugins directory:
 
    ```bash
-   git clone [https://github.com/YOUR_USERNAME/omarchy-local-ai-dashboard.git](https://github.com/YOUR_USERNAME/omarchy-local-ai-dashboard.git) ~/.config/omarchy/plugins/local-ai-dashboard
-
-```
+   git clone https://github.com/kevanoullio/kevano.local-ai-dashboard.git ~/.config/omarchy/plugins/kevano.local-ai-dashboard
+   ```
 
 2. Register the plugin by adding it to a `bar.layout` region in your Omarchy 4 configuration file (`~/.config/omarchy/shell.json`). For example, the right region:
 ```json
@@ -147,8 +158,33 @@ Displays an itemized list of all local models recognized by the selected service
 }
 ```
 
-
 3. Restart or reload your Omarchy shell session.
+
+---
+
+## Removing
+
+### Via CLI
+
+```bash
+omarchy plugin remove kevano.local-ai-dashboard
+```
+
+### Manually
+
+1. Remove the plugin entry from `~/.config/omarchy/shell.json` (delete the `"kevano.local-ai-dashboard"` object from the relevant `bar.layout` region).
+2. Delete the plugin directory:
+
+   ```bash
+   rm -rf ~/.config/omarchy/plugins/kevano.local-ai-dashboard
+   ```
+
+3. If you enabled the llama.cpp user service, disable and remove it:
+
+   ```bash
+   systemctl --user disable llama.cpp.service
+   rm -f ~/.config/systemd/user/llama.cpp.service
+   ```
 
 ---
 
